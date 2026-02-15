@@ -1598,6 +1598,28 @@ class OpenTelemetry(CustomLogger):
             ########## LLM Request Medssages / tools / content Attributes ###########
             #########################################################################
 
+            self.safe_set_attribute(
+                span=span,
+                key=SpanAttributes.GEN_AI_OPERATION_NAME.value,
+                value=(
+                    "chat"
+                    if standard_logging_payload.get("call_type") == "completion"
+                    else standard_logging_payload.get("call_type") or "chat"
+                ),
+            )
+
+            if response_obj is not None and response_obj.get("choices"):
+                finish_reasons = []
+                for choice in response_obj.get("choices"):
+                    if choice.get("finish_reason"):
+                        finish_reasons.append(choice.get("finish_reason"))
+                if finish_reasons:
+                    self.safe_set_attribute(
+                        span=span,
+                        key=SpanAttributes.GEN_AI_RESPONSE_FINISH_REASONS.value,
+                        value=safe_dumps(finish_reasons),
+                    )
+
             if litellm.turn_off_message_logging is True:
                 return
             if self.message_logging is not True:
@@ -1631,16 +1653,6 @@ class OpenTelemetry(CustomLogger):
                     value=safe_dumps(transformed_system_instructions),
                 )
 
-            self.safe_set_attribute(
-                span=span,
-                key=SpanAttributes.GEN_AI_OPERATION_NAME.value,
-                value=(
-                    "chat"
-                    if standard_logging_payload.get("call_type") == "completion"
-                    else standard_logging_payload.get("call_type") or "chat"
-                ),
-            )
-
             if standard_logging_payload.get("request_id"):
                 self.safe_set_attribute(
                     span=span,
@@ -1662,18 +1674,6 @@ class OpenTelemetry(CustomLogger):
                         key=SpanAttributes.GEN_AI_OUTPUT_MESSAGES.value,
                         value=safe_dumps(transformed_choices),
                     )
-
-                    finish_reasons = []
-                    for idx, choice in enumerate(response_obj.get("choices")):
-                        if choice.get("finish_reason"):
-                            finish_reasons.append(choice.get("finish_reason"))
-
-                    if finish_reasons:
-                        self.safe_set_attribute(
-                            span=span,
-                            key=SpanAttributes.GEN_AI_RESPONSE_FINISH_REASONS.value,
-                            value=safe_dumps(finish_reasons),
-                        )
 
                     for idx, choice in enumerate(response_obj.get("choices")):
                         if choice.get("finish_reason"):
