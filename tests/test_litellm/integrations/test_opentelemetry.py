@@ -2587,3 +2587,511 @@ class TestSetAttributesMessageLoggingGuards(unittest.TestCase):
 
         set_keys = [call[0][0] for call in mock_span.set_attribute.call_args_list]
         self.assertNotIn("gen_ai.response.finish_reasons", set_keys)
+
+
+class TestGetSemconvMode(unittest.TestCase):
+    """Tests for _get_semconv_mode() — the env-var-driven semconv selector."""
+
+    def test_default_returns_old(self):
+        """Absent env var → old mode (backward-compatible default)."""
+        from litellm.integrations.opentelemetry import _get_semconv_mode, _SEMCONV_MODE_OLD
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("OTEL_SEMCONV_STABILITY_OPT_IN", None)
+            self.assertEqual(_get_semconv_mode(), _SEMCONV_MODE_OLD)
+
+    def test_gen_ai_latest_experimental_returns_latest(self):
+        """Setting OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental → latest mode."""
+        from litellm.integrations.opentelemetry import _get_semconv_mode, _SEMCONV_MODE_LATEST
+
+        with patch.dict(os.environ, {"OTEL_SEMCONV_STABILITY_OPT_IN": "gen_ai_latest_experimental"}):
+            self.assertEqual(_get_semconv_mode(), _SEMCONV_MODE_LATEST)
+
+    def test_unrecognized_value_falls_back_to_old(self):
+        """An unrecognized value should not enable latest mode."""
+        from litellm.integrations.opentelemetry import _get_semconv_mode, _SEMCONV_MODE_OLD
+
+        with patch.dict(os.environ, {"OTEL_SEMCONV_STABILITY_OPT_IN": "some_other_value"}):
+            self.assertEqual(_get_semconv_mode(), _SEMCONV_MODE_OLD)
+
+    def test_comma_separated_including_latest_returns_latest(self):
+        """Comma-separated list that includes gen_ai_latest_experimental → latest mode."""
+        from litellm.integrations.opentelemetry import _get_semconv_mode, _SEMCONV_MODE_LATEST
+
+        with patch.dict(os.environ, {"OTEL_SEMCONV_STABILITY_OPT_IN": "http, gen_ai_latest_experimental"}):
+            self.assertEqual(_get_semconv_mode(), _SEMCONV_MODE_LATEST)
+
+
+class TestNormalizeProviderName(unittest.TestCase):
+    """Tests for OpenTelemetry._normalize_provider_name() static method."""
+
+    def _norm(self, provider: str) -> str:
+        return OpenTelemetry._normalize_provider_name(provider)
+
+    def test_known_providers_mapped_correctly(self):
+        cases = [
+            ("openai",        "openai"),
+            ("azure",         "azure.ai.openai"),
+            ("azure_ai",      "azure.ai.openai"),
+            ("anthropic",     "anthropic"),
+            ("bedrock",       "aws.bedrock"),
+            ("vertex_ai",     "gcp.vertex_ai"),
+            ("vertex_ai_beta","gcp.vertex_ai"),
+            ("gemini",        "gcp.gemini"),
+            ("cohere",        "cohere"),
+            ("cohere_chat",   "cohere"),
+            ("deepseek",      "deepseek"),
+            ("groq",          "groq"),
+            ("mistral",       "mistral_ai"),
+            ("perplexity",    "perplexity"),
+            ("xai",           "x_ai"),
+        ]
+        for provider, expected in cases:
+            with self.subTest(provider=provider):
+                self.assertEqual(self._norm(provider), expected)
+
+    def test_unknown_provider_is_returned_as_is(self):
+        """An unmapped provider string should pass through unchanged."""
+        self.assertEqual(self._norm("mycustomprovider"), "mycustomprovider")
+
+    def test_normalization_is_case_insensitive(self):
+        """Provider names should be matched case-insensitively."""
+        self.assertEqual(self._norm("OpenAI"),    "openai")
+        self.assertEqual(self._norm("ANTHROPIC"), "anthropic")
+        self.assertEqual(self._norm("Bedrock"),   "aws.bedrock")
+
+
+class TestSpanKindSemconv(unittest.TestCase):
+    """Tests that span kind=CLIENT is set in new semconv mode and absent in old mode."""
+
+    _BASE_KWARGS = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "hi"}],
+        "optional_params": {},
+        "litellm_params": {"custom_llm_provider": "openai"},
+        "standard_logging_object": {
+            "id": "req-1",
+            "call_type": "completion",
+            "metadata": {},
+            "request_id": "req-1",
+        },
+    }
+
+    def _make_otel(self, env: dict) -> OpenTelemetry:
+        with patch.dict(os.environ, env):
+            otel = OpenTelemetry()
+        return otel
+
+    def test_new_semconv_sets_span_kind_client(self):
+        """In latest semconv mode, start_span must be called with kind=SpanKind.CLIENT."""
+        from opentelemetry.trace import SpanKind
+
+        otel = self._make_otel({"OTEL_SEMCONV_STABILITY_OPT_IN": "gen_ai_latest_experimental"})
+        mock_tracer = MagicMock()
+        mock_span = MagicMock()
+        mock_tracer.start_span.return_value = mock_span
+        otel.get_tracer_to_use_for_request = MagicMock(return_value=mock_tracer)
+
+        import datetime
+        start = datetime.datetime.now()
+        end = start + datetime.timedelta(seconds=1)
+        otel._handle_success(self._BASE_KWARGS.copy(), MagicMock(), start, end)
+
+        # The inference span is the first start_span call; raw request span is second.
+        first_call_kwargs = mock_tracer.start_span.call_args_list[0][1]
+        self.assertIn("kind", first_call_kwargs)
+        self.assertEqual(first_call_kwargs["kind"], SpanKind.CLIENT)
+
+    def test_old_semconv_does_not_set_span_kind(self):
+        """In default (old) semconv mode, start_span must NOT include a kind kwarg."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("OTEL_SEMCONV_STABILITY_OPT_IN", None)
+            otel = OpenTelemetry()
+
+        mock_tracer = MagicMock()
+        mock_span = MagicMock()
+        mock_tracer.start_span.return_value = mock_span
+        otel.get_tracer_to_use_for_request = MagicMock(return_value=mock_tracer)
+
+        import datetime
+        start = datetime.datetime.now()
+        end = start + datetime.timedelta(seconds=1)
+        otel._handle_success(self._BASE_KWARGS.copy(), MagicMock(), start, end)
+
+        # Verify that no start_span call (inference or raw) was given a kind kwarg.
+        for call in mock_tracer.start_span.call_args_list:
+            self.assertNotIn("kind", call[1])
+
+
+class TestSpanNameSemconv(unittest.TestCase):
+    """Tests for _get_span_name() under different semconv modes."""
+
+    def _make_kwargs(self, model="gpt-4o", call_type="completion", generation_name=None):
+        metadata = {}
+        if generation_name:
+            metadata["generation_name"] = generation_name
+        return {
+            "model": model,
+            "litellm_params": {"custom_llm_provider": "openai", "metadata": metadata},
+            "standard_logging_object": {"call_type": call_type},
+        }
+
+    def test_new_semconv_span_name_is_operation_space_model(self):
+        """Latest mode: span name should be '{operation} {model}', e.g. 'chat gpt-4o'."""
+        with patch.dict(os.environ, {"OTEL_SEMCONV_STABILITY_OPT_IN": "gen_ai_latest_experimental"}):
+            otel = OpenTelemetry()
+
+        name = otel._get_span_name(self._make_kwargs(model="gpt-4o", call_type="completion"))
+        self.assertEqual(name, "chat gpt-4o")
+
+    def test_new_semconv_span_name_uses_correct_operation_for_embedding(self):
+        """Latest mode: embedding call_type → 'embeddings {model}'."""
+        with patch.dict(os.environ, {"OTEL_SEMCONV_STABILITY_OPT_IN": "gen_ai_latest_experimental"}):
+            otel = OpenTelemetry()
+
+        name = otel._get_span_name(self._make_kwargs(model="text-embedding-3-small", call_type="embedding"))
+        self.assertEqual(name, "embeddings text-embedding-3-small")
+
+    def test_generation_name_override_takes_priority_in_new_semconv(self):
+        """generation_name in metadata always wins over the new semconv format."""
+        with patch.dict(os.environ, {"OTEL_SEMCONV_STABILITY_OPT_IN": "gen_ai_latest_experimental"}):
+            otel = OpenTelemetry()
+
+        name = otel._get_span_name(self._make_kwargs(generation_name="my-custom-span"))
+        self.assertEqual(name, "my-custom-span")
+
+    def test_old_semconv_span_name_is_litellm_request(self):
+        """Default (old) mode: span name is LITELLM_REQUEST_SPAN_NAME (backward compat)."""
+        from litellm.integrations.opentelemetry import LITELLM_REQUEST_SPAN_NAME
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("OTEL_SEMCONV_STABILITY_OPT_IN", None)
+            otel = OpenTelemetry()
+
+        name = otel._get_span_name(self._make_kwargs())
+        self.assertEqual(name, LITELLM_REQUEST_SPAN_NAME)
+
+
+class TestProviderAttributeSemconv(unittest.TestCase):
+    """Tests that the correct provider attribute is set based on semconv mode."""
+
+    _BASE_KWARGS = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "hi"}],
+        "optional_params": {},
+        "litellm_params": {"custom_llm_provider": "openai"},
+        "standard_logging_object": {
+            "id": "req-1",
+            "call_type": "completion",
+            "metadata": {},
+        },
+    }
+
+    def _call_set_attributes(self, otel: OpenTelemetry) -> MagicMock:
+        mock_span = MagicMock()
+        response_obj = {
+            "id": "resp-1",
+            "model": "gpt-4o",
+            "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "hi"}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10},
+        }
+        otel.set_attributes(span=mock_span, kwargs=self._BASE_KWARGS.copy(), response_obj=response_obj)
+        return mock_span
+
+    def _set_attribute_keys(self, mock_span: MagicMock):
+        return [call[0][0] for call in mock_span.set_attribute.call_args_list]
+
+    def test_old_semconv_sets_gen_ai_system_not_provider_name(self):
+        """Old mode: gen_ai.system is set; gen_ai.provider.name is NOT set."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("OTEL_SEMCONV_STABILITY_OPT_IN", None)
+            otel = OpenTelemetry()
+
+        mock_span = self._call_set_attributes(otel)
+        keys = self._set_attribute_keys(mock_span)
+
+        self.assertIn("gen_ai.system", keys)
+        self.assertNotIn("gen_ai.provider.name", keys)
+
+    def test_new_semconv_sets_gen_ai_provider_name_not_gen_ai_system(self):
+        """New mode: gen_ai.provider.name is set (normalized); gen_ai.system is NOT set."""
+        with patch.dict(os.environ, {"OTEL_SEMCONV_STABILITY_OPT_IN": "gen_ai_latest_experimental"}):
+            otel = OpenTelemetry()
+
+        mock_span = self._call_set_attributes(otel)
+        keys = self._set_attribute_keys(mock_span)
+
+        self.assertIn("gen_ai.provider.name", keys)
+        self.assertNotIn("gen_ai.system", keys)
+
+    def test_new_semconv_provider_name_value_is_normalized(self):
+        """New mode: the gen_ai.provider.name value is the canonical normalized form."""
+        with patch.dict(os.environ, {"OTEL_SEMCONV_STABILITY_OPT_IN": "gen_ai_latest_experimental"}):
+            otel = OpenTelemetry()
+
+        mock_span = self._call_set_attributes(otel)
+        provider_calls = [
+            call[0][1]
+            for call in mock_span.set_attribute.call_args_list
+            if call[0][0] == "gen_ai.provider.name"
+        ]
+        self.assertEqual(len(provider_calls), 1)
+        self.assertEqual(provider_calls[0], "openai")
+
+
+class TestTokenAttributesSemconv(unittest.TestCase):
+    """Tests that the correct token attributes are set based on semconv mode."""
+
+    _BASE_KWARGS = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "hi"}],
+        "optional_params": {},
+        "litellm_params": {"custom_llm_provider": "openai"},
+        "standard_logging_object": {
+            "id": "req-1",
+            "call_type": "completion",
+            "metadata": {},
+        },
+    }
+    _RESPONSE = {
+        "id": "resp-1",
+        "model": "gpt-4o",
+        "choices": [],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+    }
+
+    def _set_attrs(self, otel: OpenTelemetry) -> MagicMock:
+        mock_span = MagicMock()
+        otel.set_attributes(span=mock_span, kwargs=self._BASE_KWARGS.copy(), response_obj=self._RESPONSE)
+        return mock_span
+
+    def _attr_keys(self, mock_span: MagicMock):
+        return [call[0][0] for call in mock_span.set_attribute.call_args_list]
+
+    def test_old_semconv_emits_both_legacy_and_new_token_names(self):
+        """Old mode emits legacy (llm.usage.*) names plus the v1.38 gen_ai.usage.* names."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("OTEL_SEMCONV_STABILITY_OPT_IN", None)
+            otel = OpenTelemetry()
+
+        mock_span = self._set_attrs(otel)
+        keys = self._attr_keys(mock_span)
+
+        # Legacy OpenLLMetry names
+        self.assertIn("gen_ai.usage.prompt_tokens",     keys)
+        self.assertIn("gen_ai.usage.completion_tokens", keys)
+        # New v1.38 names
+        self.assertIn("gen_ai.usage.input_tokens",  keys)
+        self.assertIn("gen_ai.usage.output_tokens", keys)
+        self.assertIn("gen_ai.usage.total_tokens",  keys)
+
+    def test_new_semconv_emits_only_new_token_names(self):
+        """New mode emits only gen_ai.usage.input/output/total_tokens; no legacy names."""
+        with patch.dict(os.environ, {"OTEL_SEMCONV_STABILITY_OPT_IN": "gen_ai_latest_experimental"}):
+            otel = OpenTelemetry()
+
+        mock_span = self._set_attrs(otel)
+        keys = self._attr_keys(mock_span)
+
+        # New names present
+        self.assertIn("gen_ai.usage.input_tokens",  keys)
+        self.assertIn("gen_ai.usage.output_tokens", keys)
+        self.assertIn("gen_ai.usage.total_tokens",  keys)
+        # Legacy names absent
+        self.assertNotIn("gen_ai.usage.prompt_tokens",     keys)
+        self.assertNotIn("gen_ai.usage.completion_tokens", keys)
+
+    def test_new_semconv_token_values_are_correct(self):
+        """New mode token attribute values match usage from the response."""
+        with patch.dict(os.environ, {"OTEL_SEMCONV_STABILITY_OPT_IN": "gen_ai_latest_experimental"}):
+            otel = OpenTelemetry()
+
+        mock_span = self._set_attrs(otel)
+        token_values = {call[0][0]: call[0][1] for call in mock_span.set_attribute.call_args_list}
+
+        self.assertEqual(token_values.get("gen_ai.usage.input_tokens"),  100)
+        self.assertEqual(token_values.get("gen_ai.usage.output_tokens"),  50)
+        self.assertEqual(token_values.get("gen_ai.usage.total_tokens"),  150)
+
+
+class TestToolDefinitionsSemconv(unittest.TestCase):
+    """Tests that tool definitions are emitted in the correct format per semconv mode."""
+
+    _TOOLS = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get the current weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"location": {"type": "string"}},
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_time",
+                # No description, no parameters
+            },
+        },
+    ]
+
+    def _call(self, otel: OpenTelemetry) -> MagicMock:
+        mock_span = MagicMock()
+        otel.set_tools_attributes(span=mock_span, tools=self._TOOLS)
+        return mock_span
+
+    def _attr(self, mock_span: MagicMock) -> dict:
+        return {call[0][0]: call[0][1] for call in mock_span.set_attribute.call_args_list}
+
+    def test_old_semconv_uses_indexed_flat_attributes(self):
+        """Old mode: tools are stored as llm.request.functions.{i}.name/description/parameters."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("OTEL_SEMCONV_STABILITY_OPT_IN", None)
+            otel = OpenTelemetry()
+
+        attrs = self._attr(self._call(otel))
+
+        self.assertIn("llm.request.functions.0.name",        attrs)
+        self.assertIn("llm.request.functions.0.description", attrs)
+        self.assertIn("llm.request.functions.0.parameters",  attrs)
+        self.assertIn("llm.request.functions.1.name",        attrs)
+        self.assertNotIn("gen_ai.tool.definitions",           attrs)
+
+    def test_new_semconv_uses_gen_ai_tool_definitions_json_array(self):
+        """New mode: tools are stored as a single gen_ai.tool.definitions JSON array."""
+        with patch.dict(os.environ, {"OTEL_SEMCONV_STABILITY_OPT_IN": "gen_ai_latest_experimental"}):
+            otel = OpenTelemetry()
+
+        attrs = self._attr(self._call(otel))
+
+        self.assertIn("gen_ai.tool.definitions", attrs)
+        parsed = json.loads(attrs["gen_ai.tool.definitions"])
+        self.assertIsInstance(parsed, list)
+        self.assertEqual(len(parsed), 2)
+        self.assertEqual(parsed[0]["name"], "get_weather")
+        self.assertEqual(parsed[0]["description"], "Get the current weather")
+        self.assertIn("parameters", parsed[0])
+        # No indexed flat attributes
+        self.assertNotIn("llm.request.functions.0.name", attrs)
+
+    def test_new_semconv_omits_missing_description_key(self):
+        """New mode: tool with no description should not have description key in the JSON object."""
+        with patch.dict(os.environ, {"OTEL_SEMCONV_STABILITY_OPT_IN": "gen_ai_latest_experimental"}):
+            otel = OpenTelemetry()
+
+        attrs = self._attr(self._call(otel))
+        parsed = json.loads(attrs["gen_ai.tool.definitions"])
+        no_desc_tool = next(t for t in parsed if t["name"] == "get_time")
+        self.assertNotIn("description", no_desc_tool)
+
+
+class TestRequestIdAlwaysEmitted(unittest.TestCase):
+    """
+    Tests that gen_ai.request.id is recorded regardless of message-logging settings.
+    Regression guard for the move of the request_id block before the logging guard.
+    """
+
+    _BASE_KWARGS = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "hi"}],
+        "optional_params": {},
+        "litellm_params": {"custom_llm_provider": "openai"},
+        "standard_logging_object": {
+            "id": "req-xyz",
+            "call_type": "completion",
+            "metadata": {},
+            "request_id": "req-xyz",
+        },
+    }
+    _RESPONSE = {
+        "id": "resp-1",
+        "model": "gpt-4o",
+        "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "hi"}}],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10},
+    }
+
+    def _call_set_attributes(self, otel: OpenTelemetry) -> MagicMock:
+        mock_span = MagicMock()
+        otel.set_attributes(span=mock_span, kwargs=self._BASE_KWARGS.copy(), response_obj=self._RESPONSE)
+        return mock_span
+
+    def test_request_id_emitted_when_turn_off_message_logging_true(self):
+        """gen_ai.request.id must be set even when turn_off_message_logging=True."""
+        import litellm
+
+        otel = OpenTelemetry()
+        original = litellm.turn_off_message_logging
+        try:
+            litellm.turn_off_message_logging = True
+            mock_span = self._call_set_attributes(otel)
+        finally:
+            litellm.turn_off_message_logging = original
+
+        keys = [call[0][0] for call in mock_span.set_attribute.call_args_list]
+        self.assertIn("gen_ai.request.id", keys)
+
+    def test_request_id_emitted_when_message_logging_disabled(self):
+        """gen_ai.request.id must be set even when otel.message_logging=False."""
+        otel = OpenTelemetry()
+        otel.message_logging = False
+
+        mock_span = self._call_set_attributes(otel)
+        keys = [call[0][0] for call in mock_span.set_attribute.call_args_list]
+        self.assertIn("gen_ai.request.id", keys)
+
+
+class TestMetricsProviderAttributeSemconv(unittest.TestCase):
+    """Tests that _record_metrics uses the correct provider attribute per semconv mode."""
+
+    _BASE_KWARGS = {
+        "model": "gpt-4o",
+        "litellm_params": {"custom_llm_provider": "anthropic"},
+        "standard_logging_object": {
+            "call_type": "completion",
+            "metadata": {},
+        },
+    }
+    _RESPONSE = {
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    }
+
+    def _call_record_metrics(self, otel: OpenTelemetry):
+        """Call _record_metrics with a mocked histogram and return the attributes dict."""
+        import datetime
+
+        mock_histogram = MagicMock()
+        otel._operation_duration_histogram = mock_histogram
+
+        start = datetime.datetime.now()
+        end = start + datetime.timedelta(seconds=1)
+        otel._record_metrics(self._BASE_KWARGS.copy(), self._RESPONSE, start, end)
+
+        # The first positional arg is the duration; attributes are the keyword arg
+        call_kwargs = mock_histogram.record.call_args[1]
+        return call_kwargs["attributes"]
+
+    def test_old_semconv_metrics_use_gen_ai_system(self):
+        """Old mode: common_attrs includes gen_ai.system; gen_ai.provider.name absent."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("OTEL_SEMCONV_STABILITY_OPT_IN", None)
+            otel = OpenTelemetry()
+
+        attrs = self._call_record_metrics(otel)
+
+        self.assertIn("gen_ai.system", attrs)
+        self.assertEqual(attrs["gen_ai.system"], "anthropic")
+        self.assertNotIn("gen_ai.provider.name", attrs)
+
+    def test_new_semconv_metrics_use_gen_ai_provider_name(self):
+        """New mode: common_attrs includes gen_ai.provider.name (normalized); gen_ai.system absent."""
+        with patch.dict(os.environ, {"OTEL_SEMCONV_STABILITY_OPT_IN": "gen_ai_latest_experimental"}):
+            otel = OpenTelemetry()
+
+        attrs = self._call_record_metrics(otel)
+
+        self.assertIn("gen_ai.provider.name", attrs)
+        self.assertEqual(attrs["gen_ai.provider.name"], "anthropic")
+        self.assertNotIn("gen_ai.system", attrs)
