@@ -783,8 +783,9 @@ class OpenTelemetry(CustomLogger):
         params = kwargs.get("litellm_params") or {}
         provider = params.get("custom_llm_provider", "Unknown")
 
+        call_type = (kwargs.get("standard_logging_object") or {}).get("call_type", "completion")
         common_attrs = {
-            "gen_ai.operation.name": "chat",
+            "gen_ai.operation.name": self._map_call_type_to_operation_name(call_type),
             "gen_ai.system": provider,
             "gen_ai.request.model": kwargs.get("model"),
             "gen_ai.framework": "litellm",
@@ -1561,10 +1562,8 @@ class OpenTelemetry(CustomLogger):
             self.safe_set_attribute(
                 span=span,
                 key=SpanAttributes.GEN_AI_OPERATION_NAME.value,
-                value=(
-                    "chat"
-                    if standard_logging_payload.get("call_type") == "completion"
-                    else standard_logging_payload.get("call_type") or "chat"
+                value=self._map_call_type_to_operation_name(
+                    standard_logging_payload.get("call_type") or "completion"
                 ),
             )
 
@@ -1801,6 +1800,26 @@ class OpenTelemetry(CustomLogger):
 
     def _to_ns(self, dt):
         return int(dt.timestamp() * 1e9)
+
+    @staticmethod
+    def _map_call_type_to_operation_name(call_type: str) -> str:
+        mapping = {
+            "completion": "chat",
+            "acompletion": "chat",
+            "text_completion": "text_completion",
+            "atext_completion": "text_completion",
+            "embedding": "embeddings",
+            "aembedding": "embeddings",
+            "image_generation": "image_generation",
+            "aimage_generation": "image_generation",
+            "transcription": "transcription",
+            "atranscription": "transcription",
+            "speech": "speech",
+            "aspeech": "speech",
+            "rerank": "rerank",
+            "arerank": "rerank",
+        }
+        return mapping.get(call_type, call_type)
 
     def _get_span_name(self, kwargs):
         litellm_params = kwargs.get("litellm_params", {})
