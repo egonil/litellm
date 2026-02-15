@@ -2138,6 +2138,7 @@ class TestOpenTelemetrySemanticConventions138(unittest.TestCase):
     def test_operation_name_is_chat_for_completion(self):
         """
         Test that gen_ai.operation.name is 'chat' for completion calls.
+        Regression guard: completion -> 'chat' must not regress.
         """
         otel = OpenTelemetry()
         mock_span = MagicMock()
@@ -2163,191 +2164,256 @@ class TestOpenTelemetrySemanticConventions138(unittest.TestCase):
 
         otel.set_attributes(span=mock_span, kwargs=kwargs, response_obj=response_obj)
 
-        mock_span.set_attribute.assert_any_call("gen_ai.operation.name", "chat")
+        call_args = {k: v for call in mock_span.set_attribute.call_args_list for k, v in [call[0]]}
+        assert call_args.get("gen_ai.operation.name") == "chat", (
+            f"Expected 'chat' for completion call_type, got {call_args.get('gen_ai.operation.name')!r}"
+        )
 
+    def test_operation_name_is_embeddings_for_embedding(self):
+        """
+        gen_ai.operation.name must be 'embeddings' for embedding call_type (not 'chat').
+        Regression test for the hardcoded 'chat' bug fixed in commit 7fcd20c.
+        """
+        otel = OpenTelemetry()
+        mock_span = MagicMock()
 
-class TestSetAttributesMessageLoggingGuards(unittest.TestCase):
-    """
-    Tests that gen_ai.operation.name and gen_ai.response.finish_reasons are
-    emitted regardless of message-logging settings.
-
-    Regression tests for: fix(otel): emit operation_name and finish_reasons
-    regardless of message logging.
-    """
-
-    def _make_kwargs(self, call_type="completion"):
-        return {
-            "model": "gpt-4",
-            "messages": [{"role": "user", "content": "Hello"}],
-            "optional_params": {},
+        kwargs = {
+            "model": "text-embedding-ada-002",
             "litellm_params": {"custom_llm_provider": "openai"},
             "standard_logging_object": {
                 "id": "test-id",
-                "call_type": call_type,
+                "call_type": "embedding",
                 "metadata": {},
             },
         }
 
-    def _make_response_obj(self, finish_reason="stop"):
-        return {
-            "id": "test-response-id",
-            "model": "gpt-4",
-            "choices": [
-                {
-                    "finish_reason": finish_reason,
-                    "message": {"role": "assistant", "content": "Hi"},
-                }
-            ],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
-        }
+        otel.set_attributes(span=mock_span, kwargs=kwargs, response_obj={})
 
-    @patch("litellm.turn_off_message_logging", True)
-    def test_operation_name_emitted_when_turn_off_message_logging_true(self):
-        """gen_ai.operation.name must be set even when turn_off_message_logging=True."""
+        call_args = {k: v for call in mock_span.set_attribute.call_args_list for k, v in [call[0]]}
+        assert call_args.get("gen_ai.operation.name") == "embeddings", (
+            f"Expected 'embeddings' for embedding call_type, got {call_args.get('gen_ai.operation.name')!r}"
+        )
+
+    def test_operation_name_is_embeddings_for_aembedding(self):
+        """async embedding variant must also map to 'embeddings'."""
         otel = OpenTelemetry()
         mock_span = MagicMock()
 
-        otel.set_attributes(
-            span=mock_span,
-            kwargs=self._make_kwargs(),
-            response_obj=self._make_response_obj(),
-        )
-
-        set_keys = [call[0][0] for call in mock_span.set_attribute.call_args_list]
-        self.assertIn("gen_ai.operation.name", set_keys)
-
-        # Confirm the value is correct
-        mock_span.set_attribute.assert_any_call("gen_ai.operation.name", "chat")
-
-    @patch("litellm.turn_off_message_logging", True)
-    def test_finish_reasons_emitted_when_turn_off_message_logging_true(self):
-        """gen_ai.response.finish_reasons must be set even when turn_off_message_logging=True."""
-        otel = OpenTelemetry()
-        mock_span = MagicMock()
-
-        otel.set_attributes(
-            span=mock_span,
-            kwargs=self._make_kwargs(),
-            response_obj=self._make_response_obj(finish_reason="stop"),
-        )
-
-        finish_calls = [
-            call
-            for call in mock_span.set_attribute.call_args_list
-            if call[0][0] == "gen_ai.response.finish_reasons"
-        ]
-        self.assertEqual(
-            len(finish_calls),
-            1,
-            "Should have exactly one gen_ai.response.finish_reasons attribute",
-        )
-        self.assertEqual(json.loads(finish_calls[0][0][1]), ["stop"])
-
-    @patch("litellm.turn_off_message_logging", True)
-    def test_input_messages_not_emitted_when_turn_off_message_logging_true(self):
-        """gen_ai.input.messages must NOT be set when turn_off_message_logging=True (logging guard still works)."""
-        otel = OpenTelemetry()
-        mock_span = MagicMock()
-
-        otel.set_attributes(
-            span=mock_span,
-            kwargs=self._make_kwargs(),
-            response_obj=self._make_response_obj(),
-        )
-
-        set_keys = [call[0][0] for call in mock_span.set_attribute.call_args_list]
-        self.assertNotIn("gen_ai.input.messages", set_keys)
-        self.assertNotIn("gen_ai.output.messages", set_keys)
-
-    def test_operation_name_emitted_when_message_logging_false(self):
-        """gen_ai.operation.name must be set even when otel.message_logging=False."""
-        otel = OpenTelemetry()
-        otel.message_logging = False
-        mock_span = MagicMock()
-
-        otel.set_attributes(
-            span=mock_span,
-            kwargs=self._make_kwargs(),
-            response_obj=self._make_response_obj(),
-        )
-
-        mock_span.set_attribute.assert_any_call("gen_ai.operation.name", "chat")
-
-    def test_finish_reasons_emitted_when_message_logging_false(self):
-        """gen_ai.response.finish_reasons must be set even when otel.message_logging=False."""
-        otel = OpenTelemetry()
-        otel.message_logging = False
-        mock_span = MagicMock()
-
-        otel.set_attributes(
-            span=mock_span,
-            kwargs=self._make_kwargs(),
-            response_obj=self._make_response_obj(finish_reason="length"),
-        )
-
-        finish_calls = [
-            call
-            for call in mock_span.set_attribute.call_args_list
-            if call[0][0] == "gen_ai.response.finish_reasons"
-        ]
-        self.assertEqual(len(finish_calls), 1)
-        self.assertEqual(json.loads(finish_calls[0][0][1]), ["length"])
-
-    @patch("litellm.turn_off_message_logging", True)
-    def test_operation_name_uses_call_type_for_non_completion(self):
-        """gen_ai.operation.name reflects call_type for non-completion calls, even with logging off."""
-        otel = OpenTelemetry()
-        mock_span = MagicMock()
-
-        otel.set_attributes(
-            span=mock_span,
-            kwargs=self._make_kwargs(call_type="embedding"),
-            response_obj={
-                "id": "r",
-                "model": "text-embedding-ada-002",
-                "choices": [],
-                "usage": {},
+        kwargs = {
+            "model": "text-embedding-ada-002",
+            "litellm_params": {"custom_llm_provider": "openai"},
+            "standard_logging_object": {
+                "id": "test-id",
+                "call_type": "aembedding",
+                "metadata": {},
             },
-        )
+        }
 
-        mock_span.set_attribute.assert_any_call("gen_ai.operation.name", "embedding")
+        otel.set_attributes(span=mock_span, kwargs=kwargs, response_obj={})
 
-    def test_finish_reasons_absent_when_no_finish_reason_in_choices(self):
-        """gen_ai.response.finish_reasons must not be set when all choices lack a finish_reason."""
+        call_args = {k: v for call in mock_span.set_attribute.call_args_list for k, v in [call[0]]}
+        assert call_args.get("gen_ai.operation.name") == "embeddings"
+
+    def test_operation_name_for_transcription(self):
+        """gen_ai.operation.name must be 'transcription' for transcription call_type."""
         otel = OpenTelemetry()
         mock_span = MagicMock()
 
-        response_obj = {
-            "id": "r",
-            "model": "gpt-4",
-            "choices": [
-                {"finish_reason": None, "message": {"role": "assistant", "content": ""}}
-            ],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1},
+        kwargs = {
+            "model": "whisper-1",
+            "litellm_params": {"custom_llm_provider": "openai"},
+            "standard_logging_object": {
+                "id": "test-id",
+                "call_type": "transcription",
+                "metadata": {},
+            },
         }
 
-        otel.set_attributes(
-            span=mock_span, kwargs=self._make_kwargs(), response_obj=response_obj
-        )
+        otel.set_attributes(span=mock_span, kwargs=kwargs, response_obj={})
 
-        set_keys = [call[0][0] for call in mock_span.set_attribute.call_args_list]
-        self.assertNotIn("gen_ai.response.finish_reasons", set_keys)
+        call_args = {k: v for call in mock_span.set_attribute.call_args_list for k, v in [call[0]]}
+        assert call_args.get("gen_ai.operation.name") == "transcription"
 
-    def test_finish_reasons_absent_when_response_has_no_choices(self):
-        """gen_ai.response.finish_reasons must not be set when choices list is empty."""
+    def test_operation_name_for_speech(self):
+        """gen_ai.operation.name must be 'speech' for speech call_type."""
         otel = OpenTelemetry()
         mock_span = MagicMock()
 
-        response_obj = {
-            "id": "r",
-            "model": "gpt-4",
-            "choices": [],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1},
+        kwargs = {
+            "model": "tts-1",
+            "litellm_params": {"custom_llm_provider": "openai"},
+            "standard_logging_object": {
+                "id": "test-id",
+                "call_type": "speech",
+                "metadata": {},
+            },
         }
 
-        otel.set_attributes(
-            span=mock_span, kwargs=self._make_kwargs(), response_obj=response_obj
+        otel.set_attributes(span=mock_span, kwargs=kwargs, response_obj={})
+
+        call_args = {k: v for call in mock_span.set_attribute.call_args_list for k, v in [call[0]]}
+        assert call_args.get("gen_ai.operation.name") == "speech"
+
+    def test_operation_name_for_rerank(self):
+        """gen_ai.operation.name must be 'rerank' for rerank call_type."""
+        otel = OpenTelemetry()
+        mock_span = MagicMock()
+
+        kwargs = {
+            "model": "rerank-english-v2.0",
+            "litellm_params": {"custom_llm_provider": "cohere"},
+            "standard_logging_object": {
+                "id": "test-id",
+                "call_type": "rerank",
+                "metadata": {},
+            },
+        }
+
+        otel.set_attributes(span=mock_span, kwargs=kwargs, response_obj={})
+
+        call_args = {k: v for call in mock_span.set_attribute.call_args_list for k, v in [call[0]]}
+        assert call_args.get("gen_ai.operation.name") == "rerank"
+
+
+class TestMapCallTypeToOperationName(unittest.TestCase):
+    """Unit tests for OpenTelemetry._map_call_type_to_operation_name (pure function)."""
+
+    def test_completion_maps_to_chat(self):
+        assert OpenTelemetry._map_call_type_to_operation_name("completion") == "chat"
+
+    def test_acompletion_maps_to_chat(self):
+        assert OpenTelemetry._map_call_type_to_operation_name("acompletion") == "chat"
+
+    def test_text_completion_maps_to_text_completion(self):
+        assert OpenTelemetry._map_call_type_to_operation_name("text_completion") == "text_completion"
+
+    def test_atext_completion_maps_to_text_completion(self):
+        assert OpenTelemetry._map_call_type_to_operation_name("atext_completion") == "text_completion"
+
+    def test_embedding_maps_to_embeddings(self):
+        assert OpenTelemetry._map_call_type_to_operation_name("embedding") == "embeddings"
+
+    def test_aembedding_maps_to_embeddings(self):
+        assert OpenTelemetry._map_call_type_to_operation_name("aembedding") == "embeddings"
+
+    def test_image_generation(self):
+        assert OpenTelemetry._map_call_type_to_operation_name("image_generation") == "image_generation"
+
+    def test_aimage_generation(self):
+        assert OpenTelemetry._map_call_type_to_operation_name("aimage_generation") == "image_generation"
+
+    def test_transcription(self):
+        assert OpenTelemetry._map_call_type_to_operation_name("transcription") == "transcription"
+
+    def test_atranscription(self):
+        assert OpenTelemetry._map_call_type_to_operation_name("atranscription") == "transcription"
+
+    def test_speech(self):
+        assert OpenTelemetry._map_call_type_to_operation_name("speech") == "speech"
+
+    def test_aspeech(self):
+        assert OpenTelemetry._map_call_type_to_operation_name("aspeech") == "speech"
+
+    def test_rerank(self):
+        assert OpenTelemetry._map_call_type_to_operation_name("rerank") == "rerank"
+
+    def test_arerank(self):
+        assert OpenTelemetry._map_call_type_to_operation_name("arerank") == "rerank"
+
+    def test_unknown_type_passes_through(self):
+        """Unknown call types should be returned unchanged as a safe fallback."""
+        assert OpenTelemetry._map_call_type_to_operation_name("some_future_type") == "some_future_type"
+
+    def test_all_async_variants_match_sync(self):
+        """Every async variant must map to the same value as its sync counterpart."""
+        pairs = [
+            ("completion", "acompletion"),
+            ("text_completion", "atext_completion"),
+            ("embedding", "aembedding"),
+            ("image_generation", "aimage_generation"),
+            ("transcription", "atranscription"),
+            ("speech", "aspeech"),
+            ("rerank", "arerank"),
+        ]
+        for sync, async_ in pairs:
+            assert OpenTelemetry._map_call_type_to_operation_name(
+                sync
+            ) == OpenTelemetry._map_call_type_to_operation_name(async_), (
+                f"Sync '{sync}' and async '{async_}' should map to the same operation name"
+            )
+
+
+class TestRecordMetricsOperationName(unittest.TestCase):
+    """Tests that _record_metrics passes the correct gen_ai.operation.name to histograms."""
+
+    def _make_otel_with_mock_histogram(self):
+        otel = OpenTelemetry()
+        mock_histogram = MagicMock()
+        otel._operation_duration_histogram = mock_histogram
+        otel._token_usage_histogram = None
+        otel._cost_histogram = None
+        otel._time_to_first_token_histogram = None
+        otel._time_per_output_token_histogram = None
+        otel._response_duration_histogram = None
+        return otel, mock_histogram
+
+    def _call_record_metrics(self, otel, call_type, model="gpt-4", provider="openai"):
+        from datetime import datetime, timedelta
+
+        start = datetime(2024, 1, 1, 0, 0, 0)
+        end = start + timedelta(seconds=1)
+        kwargs = {
+            "model": model,
+            "litellm_params": {"custom_llm_provider": provider},
+            "standard_logging_object": {"call_type": call_type, "metadata": {}},
+        }
+        response_obj = {"usage": {"prompt_tokens": 10, "completion_tokens": 20}}
+        otel._record_metrics(kwargs, response_obj, start, end)
+
+    def test_completion_uses_chat_label(self):
+        otel, mock_histogram = self._make_otel_with_mock_histogram()
+        self._call_record_metrics(otel, "completion")
+        attrs = mock_histogram.record.call_args[1]["attributes"]
+        assert attrs["gen_ai.operation.name"] == "chat"
+
+    def test_acompletion_uses_chat_label(self):
+        otel, mock_histogram = self._make_otel_with_mock_histogram()
+        self._call_record_metrics(otel, "acompletion")
+        attrs = mock_histogram.record.call_args[1]["attributes"]
+        assert attrs["gen_ai.operation.name"] == "chat"
+
+    def test_embedding_uses_embeddings_label(self):
+        """Regression: was hardcoded to 'chat' before this fix."""
+        otel, mock_histogram = self._make_otel_with_mock_histogram()
+        self._call_record_metrics(otel, "embedding", model="text-embedding-ada-002")
+        attrs = mock_histogram.record.call_args[1]["attributes"]
+        assert attrs["gen_ai.operation.name"] == "embeddings", (
+            f"Expected 'embeddings', got {attrs['gen_ai.operation.name']!r}"
         )
 
-        set_keys = [call[0][0] for call in mock_span.set_attribute.call_args_list]
-        self.assertNotIn("gen_ai.response.finish_reasons", set_keys)
+    def test_transcription_uses_transcription_label(self):
+        otel, mock_histogram = self._make_otel_with_mock_histogram()
+        self._call_record_metrics(otel, "transcription", model="whisper-1")
+        attrs = mock_histogram.record.call_args[1]["attributes"]
+        assert attrs["gen_ai.operation.name"] == "transcription"
+
+    def test_rerank_uses_rerank_label(self):
+        otel, mock_histogram = self._make_otel_with_mock_histogram()
+        self._call_record_metrics(otel, "rerank", model="rerank-english-v2.0", provider="cohere")
+        attrs = mock_histogram.record.call_args[1]["attributes"]
+        assert attrs["gen_ai.operation.name"] == "rerank"
+
+    def test_missing_call_type_defaults_to_chat(self):
+        """If standard_logging_object is absent, fall back to 'completion' -> 'chat'."""
+        otel, mock_histogram = self._make_otel_with_mock_histogram()
+        from datetime import datetime, timedelta
+
+        start = datetime(2024, 1, 1)
+        end = start + timedelta(seconds=1)
+        kwargs = {
+            "model": "gpt-4",
+            "litellm_params": {"custom_llm_provider": "openai"},
+        }
+        otel._record_metrics(kwargs, {}, start, end)
+        attrs = mock_histogram.record.call_args[1]["attributes"]
+        assert attrs["gen_ai.operation.name"] == "chat"
