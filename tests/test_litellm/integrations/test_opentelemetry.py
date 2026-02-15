@@ -41,7 +41,9 @@ class TestOpenTelemetryGuardrails(unittest.TestCase):
         }
 
         # Create a kwargs dict with standard_logging_object containing guardrail information
-        kwargs = {"standard_logging_object": {"guardrail_information": [ guardrail_info ]}}
+        kwargs = {
+            "standard_logging_object": {"guardrail_information": [guardrail_info]}
+        }
 
         # Call the method
         otel._create_guardrail_span(kwargs=kwargs, context=None)
@@ -195,11 +197,13 @@ class TestOpenTelemetryProviderInitialization(unittest.TestCase):
 
         # Assert: The existing provider should still be active
         current_provider = trace.get_tracer_provider()
-        assert current_provider is existing_provider, (
-            "Existing TracerProvider should be respected and not overridden"
-        )
+        assert (
+            current_provider is existing_provider
+        ), "Existing TracerProvider should be respected and not overridden"
 
-    @patch.dict(os.environ, {"LITELLM_OTEL_INTEGRATION_ENABLE_METRICS": "true"}, clear=True)
+    @patch.dict(
+        os.environ, {"LITELLM_OTEL_INTEGRATION_ENABLE_METRICS": "true"}, clear=True
+    )
     def test_init_metrics_respects_existing_meter_provider(self):
         """
         Unit test: _init_metrics() should respect existing MeterProvider.
@@ -221,11 +225,13 @@ class TestOpenTelemetryProviderInitialization(unittest.TestCase):
 
         # Assert: The existing provider should still be active
         current_provider = metrics.get_meter_provider()
-        assert current_provider is existing_provider, (
-            "Existing MeterProvider should be respected and not overridden"
-        )
+        assert (
+            current_provider is existing_provider
+        ), "Existing MeterProvider should be respected and not overridden"
 
-    @patch.dict(os.environ, {"LITELLM_OTEL_INTEGRATION_ENABLE_EVENTS": "true"}, clear=True)
+    @patch.dict(
+        os.environ, {"LITELLM_OTEL_INTEGRATION_ENABLE_EVENTS": "true"}, clear=True
+    )
     def test_init_logs_respects_existing_logger_provider(self):
         """
         Unit test: _init_logs() should respect existing LoggerProvider.
@@ -247,9 +253,9 @@ class TestOpenTelemetryProviderInitialization(unittest.TestCase):
 
         # Assert: The existing provider should still be active
         current_provider = get_logger_provider()
-        assert current_provider is existing_provider, (
-            "Existing LoggerProvider should be respected and not overridden"
-        )
+        assert (
+            current_provider is existing_provider
+        ), "Existing LoggerProvider should be respected and not overridden"
 
 
 class TestOpenTelemetry(unittest.TestCase):
@@ -287,7 +293,9 @@ class TestOpenTelemetry(unittest.TestCase):
         self.assertEqual(config.exporter, "otlp_http")
 
         # When exporter is explicitly set to something other than console, should not override
-        config_grpc = OpenTelemetryConfig(exporter="grpc", endpoint="https://otel-collector.example.com:443")
+        config_grpc = OpenTelemetryConfig(
+            exporter="grpc", endpoint="https://otel-collector.example.com:443"
+        )
         self.assertEqual(config_grpc.exporter, "grpc")
 
         # When no endpoint is set, should keep console as default
@@ -365,7 +373,9 @@ class TestOpenTelemetry(unittest.TestCase):
         }
 
         # Create a kwargs dict with standard_logging_object containing guardrail information
-        kwargs = {"standard_logging_object": {"guardrail_information": [ guardrail_info ]}}
+        kwargs = {
+            "standard_logging_object": {"guardrail_information": [guardrail_info]}
+        }
 
         # Call the method
         otel._create_guardrail_span(kwargs=kwargs, context=None)
@@ -723,7 +733,6 @@ class TestOpenTelemetry(unittest.TestCase):
         # But other attributes from OTEL_RESOURCE_ATTRIBUTES should still be present
         self.assertEqual(attributes.get("extra.attr"), "extra-value")
 
-
     def test_handle_success_spans_only(self):
         # make sure neither events nor metrics is on
         os.environ.pop("LITELLM_OTEL_INTEGRATION_ENABLE_EVENTS", None)
@@ -790,7 +799,9 @@ class TestOpenTelemetry(unittest.TestCase):
         logs = log_exporter.get_finished_logs()
         self.assertFalse(logs, "Did not expect any logs")
 
-    @patch.dict(os.environ, {"LITELLM_OTEL_INTEGRATION_ENABLE_METRICS": "true"}, clear=True)
+    @patch.dict(
+        os.environ, {"LITELLM_OTEL_INTEGRATION_ENABLE_METRICS": "true"}, clear=True
+    )
     def test_handle_success_spans_and_metrics(self):
         # ─── build in‐memory OTEL providers/exporters ─────────────────────────────
         span_exporter = InMemorySpanExporter()
@@ -1458,9 +1469,7 @@ class TestOpenTelemetryExternalSpan(unittest.TestCase):
         """Set up common test fixtures"""
         self.span_exporter = InMemorySpanExporter()
         self.tracer_provider = TracerProvider()
-        self.tracer_provider.add_span_processor(
-            SimpleSpanProcessor(self.span_exporter)
-        )
+        self.tracer_provider.add_span_processor(SimpleSpanProcessor(self.span_exporter))
 
         # Don't set global tracer provider - instead, get tracers directly from our provider
         # This avoids "Overriding of current TracerProvider is not allowed" warnings
@@ -1514,7 +1523,7 @@ class TestOpenTelemetryExternalSpan(unittest.TestCase):
 
             self.assertTrue(
                 parent_span.is_recording(),
-                "External span should be recording before completion calls"
+                "External span should be recording before completion calls",
             )
 
             # First completion call
@@ -1525,7 +1534,7 @@ class TestOpenTelemetryExternalSpan(unittest.TestCase):
             # Verify parent span is still recording
             self.assertTrue(
                 parent_span.is_recording(),
-                "External span should still be recording after first completion"
+                "External span should still be recording after first completion",
             )
 
             # Second completion call
@@ -1536,7 +1545,7 @@ class TestOpenTelemetryExternalSpan(unittest.TestCase):
             # Verify parent span is still recording
             self.assertTrue(
                 parent_span.is_recording(),
-                "External span should still be recording after second completion"
+                "External span should still be recording after second completion",
             )
 
         # After exiting context, verify spans
@@ -1547,23 +1556,25 @@ class TestOpenTelemetryExternalSpan(unittest.TestCase):
             self.assertEqual(
                 span.context.trace_id,
                 parent_trace_id,
-                f"Span {span.name} should have same trace_id as parent"
+                f"Span {span.name} should have same trace_id as parent",
             )
 
         # Should have external_parent_span
         parent_spans = self._get_spans_by_name("external_parent_span")
-        self.assertEqual(len(parent_spans), 1, "Should have exactly one external_parent_span")
+        self.assertEqual(
+            len(parent_spans), 1, "Should have exactly one external_parent_span"
+        )
 
         # Verify LiteLLM set attributes on external parent span
         parent_span_finished = parent_spans[0]
         self.assertIsNotNone(
             parent_span_finished.attributes,
-            "Parent span should have attributes set by LiteLLM"
+            "Parent span should have attributes set by LiteLLM",
         )
         self.assertIn(
             "gen_ai.request.model",
             parent_span_finished.attributes,
-            "Parent span should have model attribute from LiteLLM"
+            "Parent span should have model attribute from LiteLLM",
         )
 
         # Should have raw_gen_ai_request spans (if message_logging is on)
@@ -1575,7 +1586,7 @@ class TestOpenTelemetryExternalSpan(unittest.TestCase):
         self.assertEqual(
             len(litellm_spans),
             0,
-            "Should NOT have litellm_request spans when USE_OTEL_LITELLM_REQUEST_SPAN=false"
+            "Should NOT have litellm_request spans when USE_OTEL_LITELLM_REQUEST_SPAN=false",
         )
 
         # Verify raw_gen_ai_request spans are direct children of external span
@@ -1583,7 +1594,7 @@ class TestOpenTelemetryExternalSpan(unittest.TestCase):
             self.assertEqual(
                 raw_span.parent.span_id if raw_span.parent else None,
                 parent_span_id,
-                f"raw_gen_ai_request should be direct child of external_parent_span"
+                f"raw_gen_ai_request should be direct child of external_parent_span",
             )
 
     @patch.dict(os.environ, {"USE_OTEL_LITELLM_REQUEST_SPAN": "true"}, clear=False)
@@ -1619,7 +1630,7 @@ class TestOpenTelemetryExternalSpan(unittest.TestCase):
             # Verify parent span is still recording
             self.assertTrue(
                 parent_span.is_recording(),
-                "External span should still be recording after first completion"
+                "External span should still be recording after first completion",
             )
 
             # Second completion call
@@ -1630,7 +1641,7 @@ class TestOpenTelemetryExternalSpan(unittest.TestCase):
             # Verify parent span is still recording
             self.assertTrue(
                 parent_span.is_recording(),
-                "External span should still be recording after second completion"
+                "External span should still be recording after second completion",
             )
 
         # After exiting context, verify spans
@@ -1641,7 +1652,7 @@ class TestOpenTelemetryExternalSpan(unittest.TestCase):
             self.assertEqual(
                 span.context.trace_id,
                 parent_trace_id,
-                f"Span {span.name} should have same trace_id as parent"
+                f"Span {span.name} should have same trace_id as parent",
             )
 
         # Should have litellm_request spans (USE_OTEL_LITELLM_REQUEST_SPAN=true)
@@ -1649,7 +1660,7 @@ class TestOpenTelemetryExternalSpan(unittest.TestCase):
         self.assertEqual(
             len(litellm_spans),
             2,
-            "Should have 2 litellm_request spans when USE_OTEL_LITELLM_REQUEST_SPAN=true"
+            "Should have 2 litellm_request spans when USE_OTEL_LITELLM_REQUEST_SPAN=true",
         )
 
         # Verify litellm_request spans are children of external span
@@ -1657,7 +1668,7 @@ class TestOpenTelemetryExternalSpan(unittest.TestCase):
             self.assertEqual(
                 litellm_span.parent.span_id if litellm_span.parent else None,
                 parent_span_id,
-                "litellm_request should be child of external_parent_span"
+                "litellm_request should be child of external_parent_span",
             )
 
         # Verify raw_gen_ai_request spans (if present) are children of litellm_request
@@ -1668,7 +1679,7 @@ class TestOpenTelemetryExternalSpan(unittest.TestCase):
                 self.assertIn(
                     raw_span.parent.span_id if raw_span.parent else None,
                     litellm_span_ids,
-                    "raw_gen_ai_request should be child of litellm_request"
+                    "raw_gen_ai_request should be child of litellm_request",
                 )
 
     @patch.dict(os.environ, {"USE_OTEL_LITELLM_REQUEST_SPAN": "false"}, clear=False)
@@ -1706,7 +1717,7 @@ class TestOpenTelemetryExternalSpan(unittest.TestCase):
                 # Verify parent span is still recording after each call
                 self.assertTrue(
                     parent_span.is_recording(),
-                    f"External span should still be recording after completion #{i+1}"
+                    f"External span should still be recording after completion #{i+1}",
                 )
 
         # Verify all spans have the same trace_id
@@ -1715,19 +1726,21 @@ class TestOpenTelemetryExternalSpan(unittest.TestCase):
             self.assertEqual(
                 span.context.trace_id,
                 parent_trace_id,
-                f"All spans should belong to the same trace"
+                f"All spans should belong to the same trace",
             )
 
         # Should have the external parent span
         parent_spans = self._get_spans_by_name("external_parent_span")
-        self.assertEqual(len(parent_spans), 1, "Should have exactly one external_parent_span")
+        self.assertEqual(
+            len(parent_spans), 1, "Should have exactly one external_parent_span"
+        )
 
         # Verify LiteLLM set attributes on external parent span
         parent_span_finished = parent_spans[0]
         self.assertIn(
             "gen_ai.request.model",
             parent_span_finished.attributes,
-            "Parent span should have model attribute from LiteLLM"
+            "Parent span should have model attribute from LiteLLM",
         )
 
     @patch.dict(os.environ, {"USE_OTEL_LITELLM_REQUEST_SPAN": "false"}, clear=False)
@@ -1759,7 +1772,9 @@ class TestOpenTelemetryExternalSpan(unittest.TestCase):
 
             # Verify the span is in global context
             current_span = trace.get_current_span()
-            self.assertEqual(current_span, parent_span, "Span should be in global context")
+            self.assertEqual(
+                current_span, parent_span, "Span should be in global context"
+            )
 
             # Make completion call
             start_time = datetime.utcnow()
@@ -1769,7 +1784,7 @@ class TestOpenTelemetryExternalSpan(unittest.TestCase):
             # Verify parent span is still recording
             self.assertTrue(
                 parent_span.is_recording(),
-                "External span from global context should not be closed"
+                "External span from global context should not be closed",
             )
 
         # Verify trace structure
@@ -1778,7 +1793,7 @@ class TestOpenTelemetryExternalSpan(unittest.TestCase):
             self.assertEqual(
                 span.context.trace_id,
                 parent_trace_id,
-                "All spans should have the same trace_id"
+                "All spans should have the same trace_id",
             )
 
     @patch.dict(os.environ, {"USE_OTEL_LITELLM_REQUEST_SPAN": "false"}, clear=False)
@@ -1793,7 +1808,9 @@ class TestOpenTelemetryExternalSpan(unittest.TestCase):
         """
         # Initialize OpenTelemetry
         otel = OpenTelemetry(tracer_provider=self.tracer_provider)
-        otel.message_logging = True  # Enable message logging to get raw_gen_ai_request spans
+        otel.message_logging = (
+            True  # Enable message logging to get raw_gen_ai_request spans
+        )
 
         # Load test data
         kwargs, response_obj = self._create_test_kwargs_and_response()
@@ -1824,7 +1841,7 @@ class TestOpenTelemetryExternalSpan(unittest.TestCase):
                 self.assertEqual(
                     raw_span.parent.span_id if raw_span.parent else None,
                     parent_span_id,
-                    "raw_gen_ai_request should be child of external_parent_span"
+                    "raw_gen_ai_request should be child of external_parent_span",
                 )
 
     @patch.dict(os.environ, {"USE_OTEL_LITELLM_REQUEST_SPAN": "false"}, clear=False)
@@ -1864,7 +1881,7 @@ class TestOpenTelemetryExternalSpan(unittest.TestCase):
             # Verify parent span is still recording
             self.assertTrue(
                 parent_span.is_recording(),
-                "External span should still be recording even after failure"
+                "External span should still be recording even after failure",
             )
 
         # Verify trace structure
@@ -1875,40 +1892,42 @@ class TestOpenTelemetryExternalSpan(unittest.TestCase):
             self.assertEqual(
                 span.context.trace_id,
                 parent_trace_id,
-                "All spans should have the same trace_id even on failure"
+                "All spans should have the same trace_id even on failure",
             )
 
         # Should have external_parent_span
         parent_spans = self._get_spans_by_name("external_parent_span")
-        self.assertEqual(len(parent_spans), 1, "Should have exactly one external_parent_span")
+        self.assertEqual(
+            len(parent_spans), 1, "Should have exactly one external_parent_span"
+        )
 
         # Verify LiteLLM set attributes on external parent span even on failure
         parent_span_finished = parent_spans[0]
         self.assertIn(
             "gen_ai.request.model",
             parent_span_finished.attributes,
-            "Parent span should have model attribute from LiteLLM even on failure"
+            "Parent span should have model attribute from LiteLLM even on failure",
         )
 
 
 class TestOpenTelemetrySemanticConventions138(unittest.TestCase):
     """
     Test suite for OpenTelemetry 1.38 Semantic Conventions compliance.
-    
-    These tests verify that LiteLLM emits span attributes following the 
+
+    These tests verify that LiteLLM emits span attributes following the
     OpenTelemetry GenAI semantic conventions v1.38, including:
     - gen_ai.input.messages (JSON string with parts array)
     - gen_ai.output.messages (JSON string with parts array)
     - gen_ai.usage.input_tokens / output_tokens (new naming)
     - gen_ai.response.finish_reasons (JSON array)
-    
+
     See: https://github.com/BerriAI/litellm/issues/17794
     """
 
     def test_input_messages_uses_parts_structure(self):
         """
         Test that gen_ai.input.messages uses the OTEL 1.38 parts array structure.
-        
+
         Expected format:
         [{"role": "user", "parts": [{"type": "text", "content": "Hello"}]}]
         """
@@ -1943,14 +1962,19 @@ class TestOpenTelemetrySemanticConventions138(unittest.TestCase):
 
         # Find the call that set gen_ai.input.messages
         input_messages_calls = [
-            call for call in mock_span.set_attribute.call_args_list
+            call
+            for call in mock_span.set_attribute.call_args_list
             if call[0][0] == "gen_ai.input.messages"
         ]
-        self.assertEqual(len(input_messages_calls), 1, "Should have exactly one gen_ai.input.messages attribute")
-        
+        self.assertEqual(
+            len(input_messages_calls),
+            1,
+            "Should have exactly one gen_ai.input.messages attribute",
+        )
+
         input_messages_value = input_messages_calls[0][0][1]
         parsed = json.loads(input_messages_value)
-        
+
         # Verify structure
         self.assertIsInstance(parsed, list)
         self.assertEqual(len(parsed), 1)
@@ -1962,7 +1986,7 @@ class TestOpenTelemetrySemanticConventions138(unittest.TestCase):
     def test_output_messages_uses_parts_structure(self):
         """
         Test that gen_ai.output.messages uses the OTEL 1.38 parts array structure.
-        
+
         Expected format:
         [{"role": "assistant", "parts": [{"type": "text", "content": "Hi!"}], "finish_reason": "stop"}]
         """
@@ -1997,14 +2021,19 @@ class TestOpenTelemetrySemanticConventions138(unittest.TestCase):
 
         # Find the call that set gen_ai.output.messages
         output_messages_calls = [
-            call for call in mock_span.set_attribute.call_args_list
+            call
+            for call in mock_span.set_attribute.call_args_list
             if call[0][0] == "gen_ai.output.messages"
         ]
-        self.assertEqual(len(output_messages_calls), 1, "Should have exactly one gen_ai.output.messages attribute")
-        
+        self.assertEqual(
+            len(output_messages_calls),
+            1,
+            "Should have exactly one gen_ai.output.messages attribute",
+        )
+
         output_messages_value = output_messages_calls[0][0][1]
         parsed = json.loads(output_messages_value)
-        
+
         # Verify structure
         self.assertIsInstance(parsed, list)
         self.assertEqual(len(parsed), 1)
@@ -2039,7 +2068,11 @@ class TestOpenTelemetrySemanticConventions138(unittest.TestCase):
             "id": "test-response-id",
             "model": "gpt-4",
             "choices": [],
-            "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "total_tokens": 150,
+            },
         }
 
         otel.set_attributes(span=mock_span, kwargs=kwargs, response_obj=response_obj)
@@ -2052,7 +2085,7 @@ class TestOpenTelemetrySemanticConventions138(unittest.TestCase):
     def test_finish_reasons_is_json_array(self):
         """
         Test that gen_ai.response.finish_reasons is a proper JSON array.
-        
+
         Expected: '["stop"]' (not "['stop']")
         """
         otel = OpenTelemetry()
@@ -2074,7 +2107,10 @@ class TestOpenTelemetrySemanticConventions138(unittest.TestCase):
             "id": "test-response-id",
             "model": "gpt-4",
             "choices": [
-                {"finish_reason": "stop", "message": {"role": "assistant", "content": "Hi"}},
+                {
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "Hi"},
+                },
             ],
             "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
         }
@@ -2083,13 +2119,18 @@ class TestOpenTelemetrySemanticConventions138(unittest.TestCase):
 
         # Find the call that set gen_ai.response.finish_reasons
         finish_reasons_calls = [
-            call for call in mock_span.set_attribute.call_args_list
+            call
+            for call in mock_span.set_attribute.call_args_list
             if call[0][0] == "gen_ai.response.finish_reasons"
         ]
-        self.assertEqual(len(finish_reasons_calls), 1, "Should have exactly one gen_ai.response.finish_reasons attribute")
-        
+        self.assertEqual(
+            len(finish_reasons_calls),
+            1,
+            "Should have exactly one gen_ai.response.finish_reasons attribute",
+        )
+
         finish_reasons_value = finish_reasons_calls[0][0][1]
-        
+
         # Verify it's valid JSON (not Python repr)
         parsed = json.loads(finish_reasons_value)
         self.assertEqual(parsed, ["stop"])
@@ -2191,10 +2232,15 @@ class TestSetAttributesMessageLoggingGuards(unittest.TestCase):
         )
 
         finish_calls = [
-            call for call in mock_span.set_attribute.call_args_list
+            call
+            for call in mock_span.set_attribute.call_args_list
             if call[0][0] == "gen_ai.response.finish_reasons"
         ]
-        self.assertEqual(len(finish_calls), 1, "Should have exactly one gen_ai.response.finish_reasons attribute")
+        self.assertEqual(
+            len(finish_calls),
+            1,
+            "Should have exactly one gen_ai.response.finish_reasons attribute",
+        )
         self.assertEqual(json.loads(finish_calls[0][0][1]), ["stop"])
 
     @patch("litellm.turn_off_message_logging", True)
@@ -2240,7 +2286,8 @@ class TestSetAttributesMessageLoggingGuards(unittest.TestCase):
         )
 
         finish_calls = [
-            call for call in mock_span.set_attribute.call_args_list
+            call
+            for call in mock_span.set_attribute.call_args_list
             if call[0][0] == "gen_ai.response.finish_reasons"
         ]
         self.assertEqual(len(finish_calls), 1)
@@ -2255,7 +2302,12 @@ class TestSetAttributesMessageLoggingGuards(unittest.TestCase):
         otel.set_attributes(
             span=mock_span,
             kwargs=self._make_kwargs(call_type="embedding"),
-            response_obj={"id": "r", "model": "text-embedding-ada-002", "choices": [], "usage": {}},
+            response_obj={
+                "id": "r",
+                "model": "text-embedding-ada-002",
+                "choices": [],
+                "usage": {},
+            },
         )
 
         mock_span.set_attribute.assert_any_call("gen_ai.operation.name", "embedding")
@@ -2268,11 +2320,15 @@ class TestSetAttributesMessageLoggingGuards(unittest.TestCase):
         response_obj = {
             "id": "r",
             "model": "gpt-4",
-            "choices": [{"finish_reason": None, "message": {"role": "assistant", "content": ""}}],
+            "choices": [
+                {"finish_reason": None, "message": {"role": "assistant", "content": ""}}
+            ],
             "usage": {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1},
         }
 
-        otel.set_attributes(span=mock_span, kwargs=self._make_kwargs(), response_obj=response_obj)
+        otel.set_attributes(
+            span=mock_span, kwargs=self._make_kwargs(), response_obj=response_obj
+        )
 
         set_keys = [call[0][0] for call in mock_span.set_attribute.call_args_list]
         self.assertNotIn("gen_ai.response.finish_reasons", set_keys)
@@ -2289,7 +2345,9 @@ class TestSetAttributesMessageLoggingGuards(unittest.TestCase):
             "usage": {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1},
         }
 
-        otel.set_attributes(span=mock_span, kwargs=self._make_kwargs(), response_obj=response_obj)
+        otel.set_attributes(
+            span=mock_span, kwargs=self._make_kwargs(), response_obj=response_obj
+        )
 
         set_keys = [call[0][0] for call in mock_span.set_attribute.call_args_list]
         self.assertNotIn("gen_ai.response.finish_reasons", set_keys)
