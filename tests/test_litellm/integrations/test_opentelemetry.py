@@ -2123,3 +2123,173 @@ class TestOpenTelemetrySemanticConventions138(unittest.TestCase):
         otel.set_attributes(span=mock_span, kwargs=kwargs, response_obj=response_obj)
 
         mock_span.set_attribute.assert_any_call("gen_ai.operation.name", "chat")
+
+
+class TestSetAttributesMessageLoggingGuards(unittest.TestCase):
+    """
+    Tests that gen_ai.operation.name and gen_ai.response.finish_reasons are
+    emitted regardless of message-logging settings.
+
+    Regression tests for: fix(otel): emit operation_name and finish_reasons
+    regardless of message logging.
+    """
+
+    def _make_kwargs(self, call_type="completion"):
+        return {
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "optional_params": {},
+            "litellm_params": {"custom_llm_provider": "openai"},
+            "standard_logging_object": {
+                "id": "test-id",
+                "call_type": call_type,
+                "metadata": {},
+            },
+        }
+
+    def _make_response_obj(self, finish_reason="stop"):
+        return {
+            "id": "test-response-id",
+            "model": "gpt-4",
+            "choices": [
+                {
+                    "finish_reason": finish_reason,
+                    "message": {"role": "assistant", "content": "Hi"},
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+        }
+
+    @patch("litellm.turn_off_message_logging", True)
+    def test_operation_name_emitted_when_turn_off_message_logging_true(self):
+        """gen_ai.operation.name must be set even when turn_off_message_logging=True."""
+        otel = OpenTelemetry()
+        mock_span = MagicMock()
+
+        otel.set_attributes(
+            span=mock_span,
+            kwargs=self._make_kwargs(),
+            response_obj=self._make_response_obj(),
+        )
+
+        set_keys = [call[0][0] for call in mock_span.set_attribute.call_args_list]
+        self.assertIn("gen_ai.operation.name", set_keys)
+
+        # Confirm the value is correct
+        mock_span.set_attribute.assert_any_call("gen_ai.operation.name", "chat")
+
+    @patch("litellm.turn_off_message_logging", True)
+    def test_finish_reasons_emitted_when_turn_off_message_logging_true(self):
+        """gen_ai.response.finish_reasons must be set even when turn_off_message_logging=True."""
+        otel = OpenTelemetry()
+        mock_span = MagicMock()
+
+        otel.set_attributes(
+            span=mock_span,
+            kwargs=self._make_kwargs(),
+            response_obj=self._make_response_obj(finish_reason="stop"),
+        )
+
+        finish_calls = [
+            call for call in mock_span.set_attribute.call_args_list
+            if call[0][0] == "gen_ai.response.finish_reasons"
+        ]
+        self.assertEqual(len(finish_calls), 1, "Should have exactly one gen_ai.response.finish_reasons attribute")
+        self.assertEqual(json.loads(finish_calls[0][0][1]), ["stop"])
+
+    @patch("litellm.turn_off_message_logging", True)
+    def test_input_messages_not_emitted_when_turn_off_message_logging_true(self):
+        """gen_ai.input.messages must NOT be set when turn_off_message_logging=True (logging guard still works)."""
+        otel = OpenTelemetry()
+        mock_span = MagicMock()
+
+        otel.set_attributes(
+            span=mock_span,
+            kwargs=self._make_kwargs(),
+            response_obj=self._make_response_obj(),
+        )
+
+        set_keys = [call[0][0] for call in mock_span.set_attribute.call_args_list]
+        self.assertNotIn("gen_ai.input.messages", set_keys)
+        self.assertNotIn("gen_ai.output.messages", set_keys)
+
+    def test_operation_name_emitted_when_message_logging_false(self):
+        """gen_ai.operation.name must be set even when otel.message_logging=False."""
+        otel = OpenTelemetry()
+        otel.message_logging = False
+        mock_span = MagicMock()
+
+        otel.set_attributes(
+            span=mock_span,
+            kwargs=self._make_kwargs(),
+            response_obj=self._make_response_obj(),
+        )
+
+        mock_span.set_attribute.assert_any_call("gen_ai.operation.name", "chat")
+
+    def test_finish_reasons_emitted_when_message_logging_false(self):
+        """gen_ai.response.finish_reasons must be set even when otel.message_logging=False."""
+        otel = OpenTelemetry()
+        otel.message_logging = False
+        mock_span = MagicMock()
+
+        otel.set_attributes(
+            span=mock_span,
+            kwargs=self._make_kwargs(),
+            response_obj=self._make_response_obj(finish_reason="length"),
+        )
+
+        finish_calls = [
+            call for call in mock_span.set_attribute.call_args_list
+            if call[0][0] == "gen_ai.response.finish_reasons"
+        ]
+        self.assertEqual(len(finish_calls), 1)
+        self.assertEqual(json.loads(finish_calls[0][0][1]), ["length"])
+
+    @patch("litellm.turn_off_message_logging", True)
+    def test_operation_name_uses_call_type_for_non_completion(self):
+        """gen_ai.operation.name reflects call_type for non-completion calls, even with logging off."""
+        otel = OpenTelemetry()
+        mock_span = MagicMock()
+
+        otel.set_attributes(
+            span=mock_span,
+            kwargs=self._make_kwargs(call_type="embedding"),
+            response_obj={"id": "r", "model": "text-embedding-ada-002", "choices": [], "usage": {}},
+        )
+
+        mock_span.set_attribute.assert_any_call("gen_ai.operation.name", "embedding")
+
+    def test_finish_reasons_absent_when_no_finish_reason_in_choices(self):
+        """gen_ai.response.finish_reasons must not be set when all choices lack a finish_reason."""
+        otel = OpenTelemetry()
+        mock_span = MagicMock()
+
+        response_obj = {
+            "id": "r",
+            "model": "gpt-4",
+            "choices": [{"finish_reason": None, "message": {"role": "assistant", "content": ""}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1},
+        }
+
+        otel.set_attributes(span=mock_span, kwargs=self._make_kwargs(), response_obj=response_obj)
+
+        set_keys = [call[0][0] for call in mock_span.set_attribute.call_args_list]
+        self.assertNotIn("gen_ai.response.finish_reasons", set_keys)
+
+    def test_finish_reasons_absent_when_response_has_no_choices(self):
+        """gen_ai.response.finish_reasons must not be set when choices list is empty."""
+        otel = OpenTelemetry()
+        mock_span = MagicMock()
+
+        response_obj = {
+            "id": "r",
+            "model": "gpt-4",
+            "choices": [],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1},
+        }
+
+        otel.set_attributes(span=mock_span, kwargs=self._make_kwargs(), response_obj=response_obj)
+
+        set_keys = [call[0][0] for call in mock_span.set_attribute.call_args_list]
+        self.assertNotIn("gen_ai.response.finish_reasons", set_keys)
