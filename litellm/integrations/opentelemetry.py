@@ -59,6 +59,32 @@ LITELLM_PROXY_REQUEST_SPAN_NAME = "Received Proxy Server Request"
 RAW_REQUEST_SPAN_NAME = "raw_gen_ai_request"
 LITELLM_REQUEST_SPAN_NAME = "litellm_request"
 
+# Semantic Convention stability opt-in levels.
+# Users set OTEL_SEMCONV_STABILITY_OPT_IN env var to control which attribute
+# naming conventions are emitted. Multiple values can be comma-separated.
+# Reference: https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans/
+_SEMCONV_MODE_OLD = "old"  # Only emit pre-v1.37 attributes (default)
+_SEMCONV_MODE_LATEST = "latest"  # Only emit v1.39.0 attributes
+
+
+def _get_semconv_mode() -> str:
+    """
+    Determine which semantic convention mode to use based on
+    the OTEL_SEMCONV_STABILITY_OPT_IN environment variable.
+
+    Recognized values (comma-separated):
+      - "gen_ai_latest_experimental" -> emit only latest (v1.39.0) attributes
+      - (absent or unrecognized) -> emit only legacy attributes (backward compatible default)
+
+    Reference: https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans/
+    """
+    opt_in = os.getenv("OTEL_SEMCONV_STABILITY_OPT_IN", "")
+    values = {v.strip().lower() for v in opt_in.split(",") if v.strip()}
+
+    if "gen_ai_latest_experimental" in values:
+        return _SEMCONV_MODE_LATEST
+    return _SEMCONV_MODE_OLD
+
 
 @dataclass
 class OpenTelemetryConfig:
@@ -160,6 +186,7 @@ class OpenTelemetry(CustomLogger):
         self.OTEL_ENDPOINT = self.config.endpoint
         self.OTEL_HEADERS = self.config.headers
         self._tracer_provider_cache: Dict[str, Any] = {}
+        self._semconv_mode = _get_semconv_mode()
         self._init_tracing(tracer_provider)
 
         _debug_otel = str(os.getenv("DEBUG_OTEL", "False")).lower()
@@ -220,6 +247,67 @@ class OpenTelemetry(CustomLogger):
         ):
             litellm.service_callback.append(self)
         setattr(proxy_server, "open_telemetry_logger", self)
+
+    def _emit_old_semconv(self) -> bool:
+        """Whether to emit pre-v1.37 attribute names."""
+        return self._semconv_mode == _SEMCONV_MODE_OLD
+
+    def _emit_new_semconv(self) -> bool:
+        """Whether to emit v1.39.0 attribute names."""
+        return self._semconv_mode == _SEMCONV_MODE_LATEST
+
+    @staticmethod
+    def _map_call_type_to_operation_name(call_type: str) -> str:
+        """
+        Map LiteLLM call_type values to OTEL GenAI operation names.
+
+        v1.39.0 recognized values: chat, text_completion, embeddings,
+        generate_content, create_agent, invoke_agent, execute_tool
+        """
+        mapping = {
+            "completion": "chat",
+            "acompletion": "chat",
+            "text_completion": "text_completion",
+            "atext_completion": "text_completion",
+            "embedding": "embeddings",
+            "aembedding": "embeddings",
+            "image_generation": "image_generation",
+            "aimage_generation": "image_generation",
+            "transcription": "transcription",
+            "atranscription": "transcription",
+            "speech": "speech",
+            "aspeech": "speech",
+            "rerank": "rerank",
+            "arerank": "rerank",
+        }
+        return mapping.get(call_type, call_type)
+
+    @staticmethod
+    def _normalize_provider_name(provider: str) -> str:
+        """
+        Normalize LiteLLM provider names to v1.39.0 gen_ai.provider.name enum values.
+
+        v1.39.0 well-known values: openai, anthropic, aws.bedrock, azure.ai.openai,
+        gcp.gemini, gcp.vertex_ai, cohere, deepseek, groq, mistral_ai, perplexity, x_ai
+        """
+        mapping = {
+            "openai": "openai",
+            "azure": "azure.ai.openai",
+            "azure_ai": "azure.ai.openai",
+            "anthropic": "anthropic",
+            "bedrock": "aws.bedrock",
+            "vertex_ai": "gcp.vertex_ai",
+            "vertex_ai_beta": "gcp.vertex_ai",
+            "gemini": "gcp.gemini",
+            "cohere": "cohere",
+            "cohere_chat": "cohere",
+            "deepseek": "deepseek",
+            "groq": "groq",
+            "mistral": "mistral_ai",
+            "perplexity": "perplexity",
+            "xai": "x_ai",
+        }
+        return mapping.get(provider.lower(), provider)
 
     def _get_or_create_provider(
         self,
@@ -753,17 +841,21 @@ class OpenTelemetry(CustomLogger):
         end_time,
         context,
     ):
-        from opentelemetry.trace import Status, StatusCode
+        from opentelemetry.trace import SpanKind, Status, StatusCode
 
         otel_tracer: Tracer = self.get_tracer_to_use_for_request(kwargs)
 
         # Always create a new span
         # The parent relationship is preserved through the context parameter
-        span = otel_tracer.start_span(
-            name=self._get_span_name(kwargs),
-            start_time=self._to_ns(start_time),
-            context=context,
-        )
+        # v1.39.0: inference spans should use CLIENT kind (calls external service)
+        span_kwargs: Dict[str, Any] = {
+            "name": self._get_span_name(kwargs),
+            "start_time": self._to_ns(start_time),
+            "context": context,
+        }
+        if self._emit_new_semconv():
+            span_kwargs["kind"] = SpanKind.CLIENT
+        span = otel_tracer.start_span(**span_kwargs)
 
         span.set_status(Status(StatusCode.OK))
         self.set_attributes(span, kwargs, response_obj)
@@ -801,14 +893,24 @@ class OpenTelemetry(CustomLogger):
     def _record_metrics(self, kwargs, response_obj, start_time, end_time):
         duration_s = (end_time - start_time).total_seconds()
         params = kwargs.get("litellm_params") or {}
-        provider = params.get("custom_llm_provider", "Unknown")
+        provider = params.get("custom_llm_provider") or "Unknown"
 
-        common_attrs = {
-            "gen_ai.operation.name": "chat",
-            "gen_ai.system": provider,
+        call_type = (kwargs.get("standard_logging_object") or {}).get(
+            "call_type", "completion"
+        )
+        common_attrs: Dict[str, Any] = {
+            "gen_ai.operation.name": self._map_call_type_to_operation_name(
+                call_type
+            ),
             "gen_ai.request.model": kwargs.get("model"),
             "gen_ai.framework": "litellm",
         }
+        if self._emit_old_semconv():
+            common_attrs["gen_ai.system"] = provider
+        if self._emit_new_semconv():
+            common_attrs["gen_ai.provider.name"] = self._normalize_provider_name(
+                provider
+            )
 
         std_log = kwargs.get("standard_logging_object")
         md = getattr(std_log, "metadata", None) or (std_log or {}).get(
@@ -1213,7 +1315,7 @@ class OpenTelemetry(CustomLogger):
             guardrail_span.end(end_time=self._to_ns(end_time_datetime))
 
     def _handle_failure(self, kwargs, response_obj, start_time, end_time):
-        from opentelemetry.trace import Status, StatusCode
+        from opentelemetry.trace import SpanKind, Status, StatusCode
 
         verbose_logger.debug(
             "OpenTelemetry Logger: Failure HandlerLogging kwargs: %s, OTEL config settings=%s",
@@ -1233,11 +1335,14 @@ class OpenTelemetry(CustomLogger):
         if should_create_primary_span:
             # Span 1: Request sent to litellm SDK
             otel_tracer: Tracer = self.get_tracer_to_use_for_request(kwargs)
-            span = otel_tracer.start_span(
-                name=self._get_span_name(kwargs),
-                start_time=self._to_ns(start_time),
-                context=_parent_context,
-            )
+            span_kwargs: Dict[str, Any] = {
+                "name": self._get_span_name(kwargs),
+                "start_time": self._to_ns(start_time),
+                "context": _parent_context,
+            }
+            if self._emit_new_semconv():
+                span_kwargs["kind"] = SpanKind.CLIENT
+            span = otel_tracer.start_span(**span_kwargs)
             span.set_status(Status(StatusCode.ERROR))
             self.set_attributes(span, kwargs, response_obj)
 
@@ -1363,27 +1468,51 @@ class OpenTelemetry(CustomLogger):
             return
 
         try:
-            for i, tool in enumerate(tools):
-                function = tool.get("function")
-                if not function:
-                    continue
+            if self._emit_new_semconv():
+                # v1.39.0: structured gen_ai.tool.definitions as single JSON array
+                tool_defs = []
+                for tool in tools:
+                    function = tool.get("function")
+                    if not function:
+                        continue
+                    tool_def: Dict[str, Any] = {
+                        "name": function.get("name"),
+                    }
+                    if function.get("description"):
+                        tool_def["description"] = function["description"]
+                    if function.get("parameters"):
+                        tool_def["parameters"] = function["parameters"]
+                    tool_defs.append(tool_def)
+                if tool_defs:
+                    self.safe_set_attribute(
+                        span=span,
+                        key=SpanAttributes.GEN_AI_TOOL_DEFINITIONS.value,
+                        value=json.dumps(tool_defs),
+                    )
 
-                prefix = f"{SpanAttributes.LLM_REQUEST_FUNCTIONS.value}.{i}"
-                self.safe_set_attribute(
-                    span=span,
-                    key=f"{prefix}.name",
-                    value=function.get("name"),
-                )
-                self.safe_set_attribute(
-                    span=span,
-                    key=f"{prefix}.description",
-                    value=function.get("description"),
-                )
-                self.safe_set_attribute(
-                    span=span,
-                    key=f"{prefix}.parameters",
-                    value=json.dumps(function.get("parameters")),
-                )
+            if self._emit_old_semconv():
+                # Legacy OpenLLMetry format: indexed flat attributes
+                for i, tool in enumerate(tools):
+                    function = tool.get("function")
+                    if not function:
+                        continue
+
+                    prefix = f"{SpanAttributes.LLM_REQUEST_FUNCTIONS.value}.{i}"
+                    self.safe_set_attribute(
+                        span=span,
+                        key=f"{prefix}.name",
+                        value=function.get("name"),
+                    )
+                    self.safe_set_attribute(
+                        span=span,
+                        key=f"{prefix}.description",
+                        value=function.get("description"),
+                    )
+                    self.safe_set_attribute(
+                        span=span,
+                        key=f"{prefix}.parameters",
+                        value=json.dumps(function.get("parameters")),
+                    )
         except Exception as e:
             verbose_logger.error(
                 "OpenTelemetry: Error setting tools attributes: %s", str(e)
@@ -1521,11 +1650,20 @@ class OpenTelemetry(CustomLogger):
             )
 
             # The Generative AI Provider: Azure, OpenAI, etc.
-            self.safe_set_attribute(
-                span=span,
-                key=SpanAttributes.LLM_SYSTEM.value,
-                value=litellm_params.get("custom_llm_provider", "Unknown"),
-            )
+            provider_raw = litellm_params.get("custom_llm_provider") or "Unknown"
+            if self._emit_old_semconv():
+                self.safe_set_attribute(
+                    span=span,
+                    key=SpanAttributes.LLM_SYSTEM.value,
+                    value=provider_raw,
+                )
+            if self._emit_new_semconv():
+                # gen_ai.provider.name (v1.39.0 Required) - normalized provider name
+                self.safe_set_attribute(
+                    span=span,
+                    key=SpanAttributes.GEN_AI_PROVIDER_NAME.value,
+                    value=self._normalize_provider_name(provider_raw),
+                )
 
             # The maximum number of tokens the LLM generates for a request.
             if optional_params.get("max_tokens"):
@@ -1582,28 +1720,86 @@ class OpenTelemetry(CustomLogger):
 
             usage = response_obj and response_obj.get("usage")
             if usage:
+                if self._emit_new_semconv():
+                    # v1.39.0 attribute names only
+                    self.safe_set_attribute(
+                        span=span,
+                        key=SpanAttributes.GEN_AI_USAGE_INPUT_TOKENS.value,
+                        value=usage.get("prompt_tokens"),
+                    )
+                    self.safe_set_attribute(
+                        span=span,
+                        key=SpanAttributes.GEN_AI_USAGE_OUTPUT_TOKENS.value,
+                        value=usage.get("completion_tokens"),
+                    )
+                else:
+                    # Old mode: emit pre-v1.37 names plus the v1.38 names
+                    # (input_tokens/output_tokens) that were previously always
+                    # emitted, so existing dashboards continue to work.
+                    self.safe_set_attribute(
+                        span=span,
+                        key=SpanAttributes.LLM_USAGE_PROMPT_TOKENS.value,
+                        value=usage.get("prompt_tokens"),
+                    )
+                    self.safe_set_attribute(
+                        span=span,
+                        key=SpanAttributes.LLM_USAGE_COMPLETION_TOKENS.value,
+                        value=usage.get("completion_tokens"),
+                    )
+                    self.safe_set_attribute(
+                        span=span,
+                        key=SpanAttributes.GEN_AI_USAGE_INPUT_TOKENS.value,
+                        value=usage.get("prompt_tokens"),
+                    )
+                    self.safe_set_attribute(
+                        span=span,
+                        key=SpanAttributes.GEN_AI_USAGE_OUTPUT_TOKENS.value,
+                        value=usage.get("completion_tokens"),
+                    )
+
+                # Total tokens always emitted (not renamed in spec)
                 self.safe_set_attribute(
                     span=span,
                     key=SpanAttributes.GEN_AI_USAGE_TOTAL_TOKENS.value,
                     value=usage.get("total_tokens"),
                 )
 
-                # The number of tokens used in the LLM response (completion).
+            #############################################
+            ########## Operation Name & Request ID #######
+            #############################################
+            # gen_ai.operation.name is Required in v1.39.0 — must always be set
+            call_type = standard_logging_payload.get("call_type", "completion")
+            operation_name = self._map_call_type_to_operation_name(call_type)
+            self.safe_set_attribute(
+                span=span,
+                key=SpanAttributes.GEN_AI_OPERATION_NAME.value,
+                value=operation_name,
+            )
+
+            if standard_logging_payload.get("request_id"):
                 self.safe_set_attribute(
                     span=span,
-                    key=SpanAttributes.GEN_AI_USAGE_OUTPUT_TOKENS.value,
-                    value=usage.get("completion_tokens"),
+                    key=SpanAttributes.GEN_AI_REQUEST_ID.value,
+                    value=standard_logging_payload.get("request_id"),
                 )
 
-                # The number of tokens used in the LLM prompt.
-                self.safe_set_attribute(
-                    span=span,
-                    key=SpanAttributes.GEN_AI_USAGE_INPUT_TOKENS.value,
-                    value=usage.get("prompt_tokens"),
-                )
+            #############################################
+            ########## Response Finish Reasons ###########
+            #############################################
+            if response_obj is not None and response_obj.get("choices"):
+                finish_reasons = []
+                for choice in response_obj.get("choices"):
+                    if choice.get("finish_reason"):
+                        finish_reasons.append(choice.get("finish_reason"))
+                if finish_reasons:
+                    self.safe_set_attribute(
+                        span=span,
+                        key=SpanAttributes.GEN_AI_RESPONSE_FINISH_REASONS.value,
+                        value=safe_dumps(finish_reasons),
+                    )
 
                 ########################################################################
-            ########## LLM Request Medssages / tools / content Attributes ###########
+            ########## LLM Request Messages / tools / content Attributes ###########
             #########################################################################
 
             if litellm.turn_off_message_logging is True:
@@ -1639,22 +1835,6 @@ class OpenTelemetry(CustomLogger):
                     value=safe_dumps(transformed_system_instructions),
                 )
 
-            self.safe_set_attribute(
-                span=span,
-                key=SpanAttributes.GEN_AI_OPERATION_NAME.value,
-                value=(
-                    "chat"
-                    if standard_logging_payload.get("call_type") == "completion"
-                    else standard_logging_payload.get("call_type") or "chat"
-                ),
-            )
-
-            if standard_logging_payload.get("request_id"):
-                self.safe_set_attribute(
-                    span=span,
-                    key=SpanAttributes.GEN_AI_REQUEST_ID.value,
-                    value=standard_logging_payload.get("request_id"),
-                )
             #############################################
             ########## LLM Response Attributes ##########
             #############################################
@@ -1670,18 +1850,6 @@ class OpenTelemetry(CustomLogger):
                         key=SpanAttributes.GEN_AI_OUTPUT_MESSAGES.value,
                         value=safe_dumps(transformed_choices),
                     )
-
-                    finish_reasons = []
-                    for idx, choice in enumerate(response_obj.get("choices")):
-                        if choice.get("finish_reason"):
-                            finish_reasons.append(choice.get("finish_reason"))
-
-                    if finish_reasons:
-                        self.safe_set_attribute(
-                            span=span,
-                            key=SpanAttributes.GEN_AI_RESPONSE_FINISH_REASONS.value,
-                            value=safe_dumps(finish_reasons),
-                        )
 
                     for idx, choice in enumerate(response_obj.get("choices")):
                         if choice.get("finish_reason"):
@@ -1857,12 +2025,23 @@ class OpenTelemetry(CustomLogger):
         return int(dt.timestamp() * 1e9)
 
     def _get_span_name(self, kwargs):
+        # Explicit user override always takes priority
         litellm_params = kwargs.get("litellm_params", {})
         metadata = litellm_params.get("metadata") or {}
         generation_name = metadata.get("generation_name")
 
         if generation_name:
             return generation_name
+
+        # v1.39.0: span name should be "{operation} {model}"
+        if self._emit_new_semconv():
+            standard_logging_payload = kwargs.get("standard_logging_object")
+            call_type = (standard_logging_payload or {}).get(
+                "call_type", "completion"
+            )
+            operation = self._map_call_type_to_operation_name(call_type)
+            model = kwargs.get("model", "unknown")
+            return f"{operation} {model}"
 
         return LITELLM_REQUEST_SPAN_NAME
 

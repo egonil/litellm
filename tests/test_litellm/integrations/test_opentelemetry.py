@@ -17,7 +17,13 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from litellm.integrations.opentelemetry import OpenTelemetry, OpenTelemetryConfig
+from litellm.integrations.opentelemetry import (
+    OpenTelemetry,
+    OpenTelemetryConfig,
+    _SEMCONV_MODE_LATEST,
+    _SEMCONV_MODE_OLD,
+    _get_semconv_mode,
+)
 from litellm.litellm_core_utils.safe_json_dumps import safe_dumps
 
 
@@ -2014,11 +2020,12 @@ class TestOpenTelemetrySemanticConventions138(unittest.TestCase):
         self.assertEqual(parsed[0]["parts"][0]["content"], "Hello back!")
         self.assertEqual(parsed[0]["finish_reason"], "stop")
 
-    def test_usage_tokens_use_new_naming_convention(self):
+    def test_usage_tokens_use_default_naming_convention(self):
         """
-        Test that token usage uses the OTEL 1.38 naming convention:
-        - gen_ai.usage.input_tokens (not prompt_tokens)
-        - gen_ai.usage.output_tokens (not completion_tokens)
+        Test that token usage in default mode uses the pre-v1.37 naming convention:
+        - gen_ai.usage.prompt_tokens
+        - gen_ai.usage.completion_tokens
+        When OTEL_SEMCONV_STABILITY_OPT_IN is not set (backward compatible default).
         """
         otel = OpenTelemetry()
         mock_span = MagicMock()
@@ -2044,7 +2051,9 @@ class TestOpenTelemetrySemanticConventions138(unittest.TestCase):
 
         otel.set_attributes(span=mock_span, kwargs=kwargs, response_obj=response_obj)
 
-        # Verify new naming convention is used
+        # Default mode emits legacy names and v1.38 names for backward compat
+        mock_span.set_attribute.assert_any_call("gen_ai.usage.prompt_tokens", 100)
+        mock_span.set_attribute.assert_any_call("gen_ai.usage.completion_tokens", 50)
         mock_span.set_attribute.assert_any_call("gen_ai.usage.input_tokens", 100)
         mock_span.set_attribute.assert_any_call("gen_ai.usage.output_tokens", 50)
         mock_span.set_attribute.assert_any_call("gen_ai.usage.total_tokens", 150)
@@ -2123,3 +2132,349 @@ class TestOpenTelemetrySemanticConventions138(unittest.TestCase):
         otel.set_attributes(span=mock_span, kwargs=kwargs, response_obj=response_obj)
 
         mock_span.set_attribute.assert_any_call("gen_ai.operation.name", "chat")
+
+
+class TestSemconvOptIn(unittest.TestCase):
+    """Tests for OTEL_SEMCONV_STABILITY_OPT_IN env var parsing."""
+
+    @patch.dict(os.environ, {}, clear=False)
+    def test_default_mode_is_old(self):
+        os.environ.pop("OTEL_SEMCONV_STABILITY_OPT_IN", None)
+        assert _get_semconv_mode() == _SEMCONV_MODE_OLD
+
+    @patch.dict(os.environ, {"OTEL_SEMCONV_STABILITY_OPT_IN": "gen_ai_latest_experimental"})
+    def test_gen_ai_latest_experimental_mode(self):
+        assert _get_semconv_mode() == _SEMCONV_MODE_LATEST
+
+    @patch.dict(os.environ, {"OTEL_SEMCONV_STABILITY_OPT_IN": "http,gen_ai_latest_experimental,database"})
+    def test_comma_separated_values(self):
+        assert _get_semconv_mode() == _SEMCONV_MODE_LATEST
+
+    @patch.dict(os.environ, {"OTEL_SEMCONV_STABILITY_OPT_IN": "gen_ai"})
+    def test_unrecognized_value_falls_back_to_old(self):
+        # "gen_ai" alone is not a recognized value per the OTel spec
+        assert _get_semconv_mode() == _SEMCONV_MODE_OLD
+
+    @patch.dict(os.environ, {}, clear=False)
+    def test_emit_old_semconv_default(self):
+        os.environ.pop("OTEL_SEMCONV_STABILITY_OPT_IN", None)
+        otel = OpenTelemetry()
+        assert otel._emit_old_semconv() is True
+        assert otel._emit_new_semconv() is False
+
+    @patch.dict(os.environ, {"OTEL_SEMCONV_STABILITY_OPT_IN": "gen_ai_latest_experimental"})
+    def test_emit_only_new_in_latest_mode(self):
+        otel = OpenTelemetry()
+        assert otel._emit_old_semconv() is False
+        assert otel._emit_new_semconv() is True
+
+
+class TestOperationNameGuard(unittest.TestCase):
+    """Tests that gen_ai.operation.name is set even when message logging is off."""
+
+    @patch("litellm.turn_off_message_logging", True)
+    def test_operation_name_set_when_message_logging_off(self):
+        otel = OpenTelemetry()
+        mock_span = MagicMock()
+
+        kwargs = {
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "optional_params": {},
+            "litellm_params": {"custom_llm_provider": "openai"},
+            "standard_logging_object": {
+                "id": "test-id",
+                "call_type": "completion",
+                "metadata": {},
+            },
+        }
+
+        response_obj = {
+            "id": "test-response-id",
+            "model": "gpt-4",
+            "choices": [
+                {"finish_reason": "stop", "message": {"role": "assistant", "content": "Hi"}},
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+        }
+
+        otel.set_attributes(span=mock_span, kwargs=kwargs, response_obj=response_obj)
+
+        # gen_ai.operation.name should be set even with message logging off
+        mock_span.set_attribute.assert_any_call("gen_ai.operation.name", "chat")
+
+        # gen_ai.response.finish_reasons should also be set (metadata, not content)
+        finish_reasons_calls = [
+            call for call in mock_span.set_attribute.call_args_list
+            if call[0][0] == "gen_ai.response.finish_reasons"
+        ]
+        assert len(finish_reasons_calls) == 1
+
+        # gen_ai.input.messages should NOT be set (content, gated by message logging)
+        input_messages_calls = [
+            call for call in mock_span.set_attribute.call_args_list
+            if call[0][0] == "gen_ai.input.messages"
+        ]
+        assert len(input_messages_calls) == 0
+
+
+class TestOperationNameMapping(unittest.TestCase):
+    """Tests for _map_call_type_to_operation_name."""
+
+    def test_completion_maps_to_chat(self):
+        assert OpenTelemetry._map_call_type_to_operation_name("completion") == "chat"
+
+    def test_acompletion_maps_to_chat(self):
+        assert OpenTelemetry._map_call_type_to_operation_name("acompletion") == "chat"
+
+    def test_embedding_maps_to_embeddings(self):
+        assert OpenTelemetry._map_call_type_to_operation_name("embedding") == "embeddings"
+
+    def test_text_completion(self):
+        assert OpenTelemetry._map_call_type_to_operation_name("text_completion") == "text_completion"
+
+    def test_unknown_passthrough(self):
+        assert OpenTelemetry._map_call_type_to_operation_name("custom_type") == "custom_type"
+
+
+class TestProviderNameNormalization(unittest.TestCase):
+    """Tests for _normalize_provider_name."""
+
+    def test_openai(self):
+        assert OpenTelemetry._normalize_provider_name("openai") == "openai"
+
+    def test_azure_maps_to_azure_ai_openai(self):
+        assert OpenTelemetry._normalize_provider_name("azure") == "azure.ai.openai"
+
+    def test_bedrock_maps_to_aws_bedrock(self):
+        assert OpenTelemetry._normalize_provider_name("bedrock") == "aws.bedrock"
+
+    def test_vertex_ai_maps_to_gcp(self):
+        assert OpenTelemetry._normalize_provider_name("vertex_ai") == "gcp.vertex_ai"
+
+    def test_gemini_maps_to_gcp(self):
+        assert OpenTelemetry._normalize_provider_name("gemini") == "gcp.gemini"
+
+    def test_mistral_maps_to_mistral_ai(self):
+        assert OpenTelemetry._normalize_provider_name("mistral") == "mistral_ai"
+
+    def test_unknown_provider_passthrough(self):
+        assert OpenTelemetry._normalize_provider_name("custom_provider") == "custom_provider"
+
+    def test_case_insensitive(self):
+        assert OpenTelemetry._normalize_provider_name("OpenAI") == "openai"
+
+
+class TestProviderNameAttribute(unittest.TestCase):
+    """Tests that gen_ai.provider.name is emitted correctly."""
+
+    def _make_kwargs(self, provider="openai"):
+        return {
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "optional_params": {},
+            "litellm_params": {"custom_llm_provider": provider},
+            "standard_logging_object": {
+                "id": "test-id",
+                "call_type": "completion",
+                "metadata": {},
+            },
+        }
+
+    def _make_response(self):
+        return {
+            "id": "test-response-id",
+            "model": "gpt-4",
+            "choices": [],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+        }
+
+    @patch.dict(os.environ, {}, clear=False)
+    def test_old_mode_emits_gen_ai_system_only(self):
+        os.environ.pop("OTEL_SEMCONV_STABILITY_OPT_IN", None)
+        otel = OpenTelemetry()
+        mock_span = MagicMock()
+        otel.set_attributes(span=mock_span, kwargs=self._make_kwargs(), response_obj=self._make_response())
+
+        # gen_ai.system should be set
+        mock_span.set_attribute.assert_any_call("gen_ai.system", "openai")
+        # gen_ai.provider.name should NOT be set
+        provider_name_calls = [
+            call for call in mock_span.set_attribute.call_args_list
+            if call[0][0] == "gen_ai.provider.name"
+        ]
+        assert len(provider_name_calls) == 0
+
+    @patch.dict(os.environ, {"OTEL_SEMCONV_STABILITY_OPT_IN": "gen_ai_latest_experimental"})
+    def test_latest_mode_emits_provider_name_only(self):
+        otel = OpenTelemetry()
+        mock_span = MagicMock()
+        otel.set_attributes(span=mock_span, kwargs=self._make_kwargs(), response_obj=self._make_response())
+
+        # gen_ai.provider.name should be set
+        mock_span.set_attribute.assert_any_call("gen_ai.provider.name", "openai")
+        # gen_ai.system should NOT be set
+        system_calls = [
+            call for call in mock_span.set_attribute.call_args_list
+            if call[0][0] == "gen_ai.system"
+        ]
+        assert len(system_calls) == 0
+
+    @patch.dict(os.environ, {"OTEL_SEMCONV_STABILITY_OPT_IN": "gen_ai_latest_experimental"})
+    def test_provider_name_normalized_for_azure(self):
+        otel = OpenTelemetry()
+        mock_span = MagicMock()
+        otel.set_attributes(span=mock_span, kwargs=self._make_kwargs("azure"), response_obj=self._make_response())
+
+        mock_span.set_attribute.assert_any_call("gen_ai.provider.name", "azure.ai.openai")
+
+
+class TestSpanNaming(unittest.TestCase):
+    """Tests for v1.39.0 span naming convention."""
+
+    @patch.dict(os.environ, {}, clear=False)
+    def test_old_mode_uses_litellm_request(self):
+        os.environ.pop("OTEL_SEMCONV_STABILITY_OPT_IN", None)
+        otel = OpenTelemetry()
+        kwargs = {
+            "model": "gpt-4",
+            "litellm_params": {"metadata": {}},
+            "standard_logging_object": {"call_type": "completion"},
+        }
+        assert otel._get_span_name(kwargs) == "litellm_request"
+
+    @patch.dict(os.environ, {"OTEL_SEMCONV_STABILITY_OPT_IN": "gen_ai_latest_experimental"})
+    def test_latest_mode_uses_operation_model(self):
+        otel = OpenTelemetry()
+        kwargs = {
+            "model": "gpt-4",
+            "litellm_params": {"metadata": {}},
+            "standard_logging_object": {"call_type": "completion"},
+        }
+        assert otel._get_span_name(kwargs) == "chat gpt-4"
+
+    @patch.dict(os.environ, {"OTEL_SEMCONV_STABILITY_OPT_IN": "gen_ai_latest_experimental"})
+    def test_latest_mode_embedding_naming(self):
+        otel = OpenTelemetry()
+        kwargs = {
+            "model": "text-embedding-ada-002",
+            "litellm_params": {"metadata": {}},
+            "standard_logging_object": {"call_type": "embedding"},
+        }
+        assert otel._get_span_name(kwargs) == "embeddings text-embedding-ada-002"
+
+    @patch.dict(os.environ, {"OTEL_SEMCONV_STABILITY_OPT_IN": "gen_ai_latest_experimental"})
+    def test_generation_name_overrides_convention(self):
+        otel = OpenTelemetry()
+        kwargs = {
+            "model": "gpt-4",
+            "litellm_params": {"metadata": {"generation_name": "my_custom_span"}},
+            "standard_logging_object": {"call_type": "completion"},
+        }
+        assert otel._get_span_name(kwargs) == "my_custom_span"
+
+
+class TestTokenUsageAttributes(unittest.TestCase):
+    """Tests for conditional token usage attribute names."""
+
+    def _make_kwargs_and_response(self):
+        kwargs = {
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "optional_params": {},
+            "litellm_params": {"custom_llm_provider": "openai"},
+            "standard_logging_object": {
+                "id": "test-id",
+                "call_type": "completion",
+                "metadata": {},
+            },
+        }
+        response_obj = {
+            "id": "test-response-id",
+            "model": "gpt-4",
+            "choices": [],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+        }
+        return kwargs, response_obj
+
+    @patch.dict(os.environ, {}, clear=False)
+    def test_old_mode_emits_legacy_and_v138_token_names(self):
+        """Old mode emits both pre-v1.37 names and v1.38 names for backward compat."""
+        os.environ.pop("OTEL_SEMCONV_STABILITY_OPT_IN", None)
+        otel = OpenTelemetry()
+        mock_span = MagicMock()
+        kwargs, response_obj = self._make_kwargs_and_response()
+        otel.set_attributes(span=mock_span, kwargs=kwargs, response_obj=response_obj)
+
+        # Pre-v1.37 legacy names
+        mock_span.set_attribute.assert_any_call("gen_ai.usage.prompt_tokens", 10)
+        mock_span.set_attribute.assert_any_call("gen_ai.usage.completion_tokens", 20)
+        # v1.38 names also present to preserve pre-PR behaviour
+        mock_span.set_attribute.assert_any_call("gen_ai.usage.input_tokens", 10)
+        mock_span.set_attribute.assert_any_call("gen_ai.usage.output_tokens", 20)
+        mock_span.set_attribute.assert_any_call("gen_ai.usage.total_tokens", 30)
+
+    @patch.dict(os.environ, {"OTEL_SEMCONV_STABILITY_OPT_IN": "gen_ai_latest_experimental"})
+    def test_latest_mode_emits_new_token_names(self):
+        otel = OpenTelemetry()
+        mock_span = MagicMock()
+        kwargs, response_obj = self._make_kwargs_and_response()
+        otel.set_attributes(span=mock_span, kwargs=kwargs, response_obj=response_obj)
+
+        mock_span.set_attribute.assert_any_call("gen_ai.usage.input_tokens", 10)
+        mock_span.set_attribute.assert_any_call("gen_ai.usage.output_tokens", 20)
+        # Old names should NOT be present
+        call_keys = [call[0][0] for call in mock_span.set_attribute.call_args_list]
+        assert "gen_ai.usage.prompt_tokens" not in call_keys
+        assert "gen_ai.usage.completion_tokens" not in call_keys
+
+
+class TestToolDefinitions(unittest.TestCase):
+    """Tests for tool definitions format based on semconv mode."""
+
+    TOOLS = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get the weather",
+                "parameters": {"type": "object", "properties": {"location": {"type": "string"}}},
+            },
+        }
+    ]
+
+    @patch.dict(os.environ, {}, clear=False)
+    def test_old_mode_uses_legacy_format(self):
+        os.environ.pop("OTEL_SEMCONV_STABILITY_OPT_IN", None)
+        otel = OpenTelemetry()
+        mock_span = MagicMock()
+        otel.set_tools_attributes(mock_span, self.TOOLS)
+
+        mock_span.set_attribute.assert_any_call("llm.request.functions.0.name", "get_weather")
+        mock_span.set_attribute.assert_any_call("llm.request.functions.0.description", "Get the weather")
+        # gen_ai.tool.definitions should NOT be set
+        call_keys = [call[0][0] for call in mock_span.set_attribute.call_args_list]
+        assert "gen_ai.tool.definitions" not in call_keys
+
+    @patch.dict(os.environ, {"OTEL_SEMCONV_STABILITY_OPT_IN": "gen_ai_latest_experimental"})
+    def test_latest_mode_uses_structured_format(self):
+        otel = OpenTelemetry()
+        mock_span = MagicMock()
+        otel.set_tools_attributes(mock_span, self.TOOLS)
+
+        # gen_ai.tool.definitions should be set as JSON
+        tool_def_calls = [
+            call for call in mock_span.set_attribute.call_args_list
+            if call[0][0] == "gen_ai.tool.definitions"
+        ]
+        assert len(tool_def_calls) == 1
+        parsed = json.loads(tool_def_calls[0][0][1])
+        assert len(parsed) == 1
+        assert parsed[0]["name"] == "get_weather"
+        # Legacy format should NOT be set
+        legacy_calls = [
+            call for call in mock_span.set_attribute.call_args_list
+            if call[0][0].startswith("llm.request.functions")
+        ]
+        assert len(legacy_calls) == 0
+

@@ -2946,6 +2946,7 @@ class SpanAttributes(str, enum.Enum):
     LLM_USAGE_PROMPT_TOKENS = "gen_ai.usage.prompt_tokens"
 
     # OTEL 1.38 attributes
+    GEN_AI_PROVIDER_NAME = "gen_ai.provider.name"
     GEN_AI_INPUT_MESSAGES = "gen_ai.input.messages"
     GEN_AI_OUTPUT_MESSAGES = "gen_ai.output.messages"
     GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"
@@ -2955,6 +2956,7 @@ class SpanAttributes(str, enum.Enum):
     GEN_AI_REQUEST_ID = "gen_ai.request.id"
     GEN_AI_SYSTEM_INSTRUCTIONS = "gen_ai.system_instructions"
     GEN_AI_RESPONSE_FINISH_REASONS = "gen_ai.response.finish_reasons"
+    GEN_AI_TOOL_DEFINITIONS = "gen_ai.tool.definitions"
 
     LLM_TOKEN_TYPE = "gen_ai.token.type"
     # To be added
