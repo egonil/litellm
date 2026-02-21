@@ -429,7 +429,7 @@ def test_anthropic_web_search_in_model_info():
     litellm.model_cost = litellm.get_model_cost_map(url="")
 
     supported_models = [
-        "anthropic/claude-3-7-sonnet-20250219",
+        "anthropic/claude-4-sonnet-20250514",
         "anthropic/claude-sonnet-4-5-20250929",
         "anthropic/claude-3-5-sonnet-20241022",
         "anthropic/claude-3-5-haiku-20241022",
@@ -1050,7 +1050,7 @@ def test_supports_computer_use_utility():
     try:
         # Test a model known to support computer_use from backup JSON
         supports_cu_anthropic = supports_computer_use(
-            model="anthropic/claude-3-7-sonnet-20250219"
+            model="anthropic/claude-4-sonnet-20250514"
         )
         assert supports_cu_anthropic is True
 
@@ -1073,7 +1073,7 @@ def test_supports_computer_use_utility():
 def test_get_model_info_shows_supports_computer_use():
     """
     Tests if 'supports_computer_use' is correctly retrieved by get_model_info.
-    We'll use 'claude-3-7-sonnet-20250219' as it's configured
+    We'll use 'claude-4-sonnet-20250514' as it's configured
     in the backup JSON to have supports_computer_use: True.
     """
     os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
@@ -1082,7 +1082,7 @@ def test_get_model_info_shows_supports_computer_use():
     litellm.model_cost = litellm.get_model_cost_map(url="")
 
     # This model should have 'supports_computer_use': True in the backup JSON
-    model_known_to_support_computer_use = "claude-3-7-sonnet-20250219"
+    model_known_to_support_computer_use = "claude-4-sonnet-20250514"
     info = litellm.get_model_info(model_known_to_support_computer_use)
     print(f"Info for {model_known_to_support_computer_use}: {info}")
 
@@ -2655,6 +2655,59 @@ def test_model_info_for_openrouter_kimi_k2_5():
     assert model_info["supports_tool_choice"] is True
 
     print("openrouter kimi-k2.5 model info", model_info)
+
+
+def test_model_info_for_fireworks_short_form_models():
+    """
+    Test that fireworks_ai short-form model entries (fireworks_ai/<model>)
+    are correctly configured in model_prices_and_context_window.json.
+
+    These entries enable cost attribution for models called via short-form
+    names (e.g., fireworks_ai/glm-4p7 instead of
+    fireworks_ai/accounts/fireworks/models/glm-4p7).
+    """
+    import json
+    from pathlib import Path
+
+    json_path = Path(__file__).parents[2] / "model_prices_and_context_window.json"
+    with open(json_path) as f:
+        model_cost = json.load(f)
+
+    # glm-4p7: short-form and long-form
+    for key in [
+        "fireworks_ai/glm-4p7",
+        "fireworks_ai/accounts/fireworks/models/glm-4p7",
+    ]:
+        info = model_cost.get(key)
+        assert info is not None, f"{key} not found in model_prices_and_context_window.json"
+        assert info["litellm_provider"] == "fireworks_ai"
+        assert info["mode"] == "chat"
+        assert info["input_cost_per_token"] == 6e-07
+        assert info["output_cost_per_token"] == 2.2e-06
+        assert info["max_input_tokens"] == 202800
+        assert info["supports_reasoning"] is True
+
+    # minimax-m2p1: short-form and long-form
+    for key in [
+        "fireworks_ai/minimax-m2p1",
+        "fireworks_ai/accounts/fireworks/models/minimax-m2p1",
+    ]:
+        info = model_cost.get(key)
+        assert info is not None, f"{key} not found in model_prices_and_context_window.json"
+        assert info["litellm_provider"] == "fireworks_ai"
+        assert info["mode"] == "chat"
+        assert info["input_cost_per_token"] == 3e-07
+        assert info["output_cost_per_token"] == 1.2e-06
+        assert info["max_input_tokens"] == 204800
+
+    # kimi-k2p5: short-form only (long-form already existed)
+    info = model_cost.get("fireworks_ai/kimi-k2p5")
+    assert info is not None, "fireworks_ai/kimi-k2p5 not found in model_prices_and_context_window.json"
+    assert info["litellm_provider"] == "fireworks_ai"
+    assert info["mode"] == "chat"
+    assert info["input_cost_per_token"] == 6e-07
+    assert info["output_cost_per_token"] == 3e-06
+    assert info["max_input_tokens"] == 262144
 
 
 class TestGetValidModelsWithCLI:
